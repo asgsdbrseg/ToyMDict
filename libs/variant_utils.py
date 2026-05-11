@@ -41,7 +41,7 @@ class VariantHandler:
         for k in self.variant_map:
             self.variant_map[k].add(k)
         
-        print(f"异体字映射构建完成，共 {len(self.variant_map)} 个字符")
+        # 不再单独打印字符数（已在 DictionaryManager 中统一输出）
     
     def get_variants(self, char: str) -> Set[str]:
         """

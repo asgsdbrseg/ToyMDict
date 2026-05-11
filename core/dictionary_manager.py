@@ -28,8 +28,13 @@ class DictionaryManager:
             for key, val in variants.items():
                 variant_dict[key] = val
 
-            print(f"加载异体字映射表: {json_path} ({len(variant_dict)} 条规则)")
+            print(f"[异体字] 映射表: {json_path}")
             self._variant_handler = VariantHandler(variant_dict)
+            
+            # 输出统计信息（在 VariantHandler 构建完成后才能获取准确的字符数）
+            rule_count = len(variant_dict)  # 规则组数（JSON 中的顶级键数量）
+            char_count = len(self._variant_handler.variant_map)  # 实际覆盖的字符数（构建后）
+            print(f"  {rule_count} 组规则,  {char_count} 个字符")
         except Exception as e:
             print(f"加载异体字失败: {e}")
 
@@ -42,9 +47,7 @@ class DictionaryManager:
         wrapper = MdxWrapper(abs_path)
         if wrapper.load(variant_handler=self._variant_handler):
             self.loaded_dicts[abs_path] = wrapper
-            version = getattr(wrapper.mdx, 'base_mdx', None)
-            ver_str = f"v{version._version}" if version is not None else "unknown"
-            print(f"[加载词典] {os.path.basename(abs_path)} (MDX {ver_str})")
+            # 注意：不再单独打印 "[加载词典]" 行，因为 MdxWrapper.load() 已输出详细信息
             return True
         return False
 
@@ -72,7 +75,7 @@ class DictionaryManager:
                         "dict_name": wrapper.name
                     })
         results = list(merged_results.values())
-        results.sort(key=lambda x: len(x["key"]))
+        results.sort(key=lambda x: (0 if x["key"] == keyword else 1, len(x["key"])))
         return results
 
     def get_content(self, dict_id: str, key: str, idx: int = None) -> tuple:
