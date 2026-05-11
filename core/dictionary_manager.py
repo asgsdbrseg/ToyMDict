@@ -5,9 +5,8 @@ import json
 
 class DictionaryManager:
     def __init__(self):
-        self.loaded_dicts: dict[str, MdxWrapper] = {}  # 绝对路径 -> 实例
+        self.loaded_dicts: dict[str, MdxWrapper] = {}
         self._variant_handler = None
-        # 修复点1：程序启动时直接初始化异体字
         self._init_variant_handler()
 
     def _init_variant_handler(self):
@@ -16,18 +15,14 @@ class DictionaryManager:
             from utils.path_helper import get_app_base_dir
             base_dir = get_app_base_dir()
             json_path = os.path.join(base_dir, "variants.json")
-
             if not os.path.exists(json_path):
                 print(f"[警告] 未找到异体字映射表: {json_path}，异体字搜索将被禁用")
                 return
-
             with open(json_path, 'r', encoding='utf-8') as f:
                 variants = json.load(f)
-
             variant_dict = {}
             for key, val in variants.items():
                 variant_dict[key] = val
-
             print(f"[异体字] 映射表: {json_path}")
             self._variant_handler = VariantHandler(variant_dict)
             
@@ -38,16 +33,14 @@ class DictionaryManager:
         except Exception as e:
             print(f"加载异体字失败: {e}")
 
-
     def load_mdx(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
         if abs_path in self.loaded_dicts or not os.path.exists(abs_path):
             return abs_path in self.loaded_dicts
-
+        
         wrapper = MdxWrapper(abs_path)
         if wrapper.load(variant_handler=self._variant_handler):
             self.loaded_dicts[abs_path] = wrapper
-            # 注意：不再单独打印 "[加载词典]" 行，因为 MdxWrapper.load() 已输出详细信息
             return True
         return False
 
@@ -63,44 +56,55 @@ class DictionaryManager:
             self.unload_mdx(p)
 
     def search(self, keyword: str, use_variants: bool) -> list:
-        if not self.loaded_dicts or not keyword: return []
+        if not self.loaded_dicts or not keyword:
+            return []
         merged_results = {}
         for path, wrapper in self.loaded_dicts.items():
             for key, idx in wrapper.search(keyword, use_variants):
                 if key not in merged_results:
                     merged_results[key] = {"key": key, "sources": []}
-                if not any(s["dict_id"] == path for s in merged_results[key]["sources"]):
+                # 修改：以 dict_id + idx 作为去重凭证，避免同名词条被吞并
+                if not any(s["dict_id"] == path and s["idx"] == idx for s in merged_results[key]["sources"]):
                     merged_results[key]["sources"].append({
                         "dict_id": path,
-                        "dict_name": wrapper.name
+                        "dict_name": wrapper.name,
+                        "idx": idx  # 新增：保留词条索引
                     })
         results = list(merged_results.values())
         results.sort(key=lambda x: (0 if x["key"] == keyword else 1, len(x["key"])))
         return results
 
-    def get_content(self, dict_id: str, key: str, idx: int = None) -> tuple:
+    def get_content(self, dict_id: str, key: str, idx: int = None) -> tuple:  # 修改：增加 idx 传递
         abs_path = os.path.abspath(dict_id)
         wrapper = self.loaded_dicts.get(abs_path)
-        if not wrapper: return "", ""
+        if not wrapper:
+            return "", ""
         return wrapper.get_content(key, idx), wrapper.name
 
     def get_resource(self, dict_id: str, path: str) -> bytes:
         abs_path = os.path.abspath(dict_id)
-        if abs_path not in self.loaded_dicts: return None
+        if abs_path not in self.loaded_dicts:
+            return None
         wrapper = self.loaded_dicts[abs_path]
         data = None
         if wrapper.mdd:
-            try: data = wrapper.mdd.get(path)
-            except: pass
+            try:
+                data = wrapper.mdd.get(path)
+            except:
+                pass
         if not data and wrapper.folder_path:
             try:
                 file_path = os.path.join(wrapper.folder_path, path)
                 if os.path.exists(file_path):
-                    with open(file_path, 'rb') as f: data = f.read()
-            except: pass
+                    with open(file_path, 'rb') as f:
+                        data = f.read()
+            except:
+                pass
         if data:
             if isinstance(data, str):
-                try: return data.encode('utf-8')
-                except: return data.encode('gbk', errors='ignore')
+                try:
+                    return data.encode('utf-8')
+                except:
+                    return data.encode('gbk', errors='ignore')
             return data
         return None

@@ -19,7 +19,7 @@ class MdxWrapper:
     def load(self, variant_handler=None) -> bool:
         # 新任务开始：空行分隔 + 显示路径
         print(f"\n[词典] {self.path}")
-        
+
         try:
             self.mdx = CachedMDX(self.path, encoding='utf-8')
             mdd_path = os.path.join(self.folder_path, self.name + '.mdd')
