@@ -40,9 +40,7 @@ class VariantHandler:
         # 确保每个字符的映射中包含自身
         for k in self.variant_map:
             self.variant_map[k].add(k)
-        
-        # 不再单独打印字符数（已在 DictionaryManager 中统一输出）
-    
+  
     def get_variants(self, char: str) -> Set[str]:
         """
         获取某个字符的所有异体字（包括自身）

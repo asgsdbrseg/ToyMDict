@@ -231,7 +231,7 @@ class MDict(object):
             adler32 = unpack('<I', f.read(4))[0]
             assert(adler32 == zlib.adler32(header_bytes) & 0xffffffff)
             self._key_block_offset = f.tell()
-        
+                
         if header_bytes[-2:] == b'\x00\x00': header_text = header_bytes[:-2].decode('utf-16').encode('utf-8')
         else: header_text = header_bytes[:-1]
         header_tag = self._parse_header(header_text)
@@ -561,7 +561,7 @@ class CachedMDX:
                         "comp": comp_size,
                         "decomp": decomp_size
                     })
-                    f.seek(comp_size, 1)
+            f.seek(comp_size, 1)
 
     def _build_index(self):
         with self._file_lock:
@@ -673,6 +673,7 @@ class CachedMDX:
             keys_block = self._get_key_block(idx)
             base_abs_idx = sum(m["count"] for m in self._key_blocks_meta[:idx])
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
+                # 【修复】_split_key_block 输出的是 utf-8 bytes，必须用 utf-8 解码
                 key_str = key_bytes.decode('utf-8', errors='ignore')
                 if key_str.lower().startswith(prefix_lower):
                     results.append((key_str, base_abs_idx + local_idx))
@@ -764,7 +765,6 @@ class CachedMDD:
             sf = BytesIO(block)
             m._read_number(sf)
             m._read_number(sf)
-
             if m._version >= 2.0:
                 m._read_number(sf)
                 kb_info_size = m._read_number(sf)
