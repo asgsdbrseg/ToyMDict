@@ -19,3 +19,16 @@
 3. 未考虑中文以外的语言
 4. 不支持多MDD
 5. 不支持外挂字体
+
+与GoldenDict对比
+1. 只重衣衫不重人
+![只重衣衫不重人](./readme_img/SnowShot_2026-05-15_21-19-47.png)
+![只重衣衫不重人](./readme_img/SnowShot_2026-05-15_21-20-34.png)
+
+2. 堆垛
+![堆垛](./readme_img/SnowShot_2026-05-15_21-21-08.png)
+![堆垛](./readme_img/SnowShot_2026-05-15_21-21-21.png)
+
+3. 钱松岩
+![钱松岩](./readme_img/SnowShot_2026-05-15_21-27-51.png)
+![钱松岩](./readme_img/SnowShot_2026-05-15_21-28-03.png)
