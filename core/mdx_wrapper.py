@@ -161,11 +161,6 @@ class MdxWrapper:
             print(f"[调试] 获取词条数量失败: {e}")
             return 0
 
-    def get_resource(self, path: str) -> Optional[bytes]:
-        if not self.mdd:
-            return None
-        return self.mdd.get(path)
-
     def search(self, keyword: str, use_variants: bool) -> list:
         if not self.loaded or not keyword:
             return []
