@@ -19,34 +19,6 @@ class MdxResourceResolver:
         return abs_resource.startswith(abs_dict_dir)
 
     @staticmethod
-    def rewrite_html_resources(raw_html, dict_id, base_url):
-        """从 window_api 抽离出来的 HTML 重写逻辑"""
-        encoded_id = quote(unquote(dict_id), safe='')
-        
-        def replace_resource(match):
-            attr_start, path, attr_end = match.group(1), match.group(2), match.group(3)
-            if path.startswith(('http://', 'https://', 'data:', 'javascript:', '#')):
-                return match.group(0)
-            safe_path = quote(unquote(path), safe='')
-            return f'{attr_start}{base_url}/resource?dict_id={encoded_id}&path={safe_path}{attr_end}'
-
-        resource_pattern = re.compile(r'((?:src|href)\s*=\s*["\'])([^"\']+)(["\'])', re.IGNORECASE)
-        
-        # 剥离原有标签防止XSS/重复加载
-        body_content = re.sub(r'<\?xml[^>]*\?>', '', raw_html)
-        links = re.findall(r'<link\s+[^>]*?>', body_content, re.IGNORECASE)
-        scripts = re.findall(r'<script[^>]*>[\s\S]*?</script>', body_content, re.IGNORECASE)
-        for tag in links + scripts:
-            body_content = body_content.replace(tag, '', 1)
-
-        # 统一替换
-        body_content = resource_pattern.sub(replace_resource, body_content)
-        head_content = "\n".join([resource_pattern.sub(replace_resource, l) for l in links]) + \
-                       "\n" + \
-                       "\n".join([resource_pattern.sub(replace_resource, s) for s in scripts])
-        return head_content, body_content
-
-    @staticmethod
     def resolve_resource(dict_manager, dict_id, path):
         """供 ResourceServer 调用的统一入口"""
         path = unquote(path)
