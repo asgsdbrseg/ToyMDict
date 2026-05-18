@@ -174,44 +174,66 @@ HTML_TEMPLATE = """
                 </div>`; 
             }).join(''); 
         } 
-        function setContent(dictDataArray) { 
-            const container = document.getElementById('contentArea'); 
-            container.innerHTML = ''; 
-            window.removeEventListener('message', this._iframeMessageHandler); 
-            this._iframeMessageHandler = function(event) { 
-                if (event.data && event.data.type === 'resize') { 
-                    const iframe = document.getElementById(event.data.id); 
-                    if (iframe) iframe.style.height = (event.data.height + 30) + 'px'; 
-                } 
-            }; 
-            window.addEventListener('message', this._iframeMessageHandler); 
-            dictDataArray.forEach((item, index) => { 
-                const details = document.createElement('details'); 
-                details.className = 'dict-block'; 
-                if (index === 0) details.open = true; 
-                const summary = document.createElement('summary'); 
-                summary.className = 'dict-summary'; 
-                summary.innerText = `📖 ${item.dict_name}`; 
-                details.appendChild(summary); 
-                const iframeWrapper = document.createElement('div'); 
-                iframeWrapper.style.cssText = 'padding: 0; margin: 0;'; 
-                const iframe = document.createElement('iframe'); 
-                const iframeId = `dict-iframe-${index}`; 
-                iframe.id = iframeId; 
-                iframe.style.cssText = 'width: 100%; border: none; height: 0px; overflow: hidden !important;'; 
-                iframe.setAttribute('frameborder', '0'); 
-                iframe.setAttribute('scrolling', 'no'); 
-                iframe.srcdoc = item.html; 
-                iframeWrapper.appendChild(iframe); 
-                details.appendChild(iframeWrapper); 
-                details.addEventListener('toggle', function() { 
-                    if (details.open) setTimeout(function() { 
-                        iframe.contentWindow.postMessage('calcHeight', '*'); 
-                    }, 100); 
-                }); 
-                container.appendChild(details); 
-            }); 
-        } 
+        function setContent(dictDataArray) {
+            const container = document.getElementById('contentArea');
+            container.innerHTML = '';
+
+            // 移除旧的消息处理器
+            if (window._iframeMsgHandler) {
+                window.removeEventListener('message', window._iframeMsgHandler);
+            }
+
+            // 新的容差策略处理器
+            window._iframeMsgHandler = function(event) {
+                if (event.data && event.data.type === 'resize') {
+                    const iframe = document.getElementById(event.data.id);
+                    if (iframe) {
+                        var newH = event.data.height;
+                        var curH = parseInt(iframe.style.height) || 0;
+                        // 核心修复：允许缩小，但高度变化小于 5px 时不触发重排（防微抖）
+                        if (Math.abs(newH - curH) > 5) {
+                            iframe.style.height = newH + 'px';
+                        }
+                    }
+                }
+            };
+            window.addEventListener('message', window._iframeMsgHandler);
+
+            dictDataArray.forEach((item, index) => {
+                const details = document.createElement('details');
+                details.className = 'dict-block';
+                if (index === 0) details.open = true;
+
+                const summary = document.createElement('summary');
+                summary.className = 'dict-summary';
+                summary.innerText = '📖 ' + item.dict_name;
+                details.appendChild(summary);
+
+                const iframeWrapper = document.createElement('div');
+                iframeWrapper.style.cssText = 'padding: 0; margin: 0;';
+
+                const iframe = document.createElement('iframe');
+                const iframeId = 'dict-iframe-' + index;
+                iframe.id = iframeId;
+                iframe.style.cssText = 'width: 100%; border: none; height: 0px; overflow: hidden !important;';
+                iframe.setAttribute('frameborder', '0');
+                iframe.setAttribute('scrolling', 'no');
+                iframe.srcdoc = item.html;
+
+                iframeWrapper.appendChild(iframe);
+                details.appendChild(iframeWrapper);
+
+                details.addEventListener('toggle', function() {
+                    if (details.open) {
+                        setTimeout(function() {
+                            try { iframe.contentWindow.postMessage('calcHeight', '*'); } catch(e) {}
+                        }, 100);
+                    }
+                });
+
+                container.appendChild(details);
+            });
+        }
         function showEntry(index) { 
             document.querySelectorAll('.result-item').forEach(el => el.classList.remove('active')); 
             document.querySelectorAll('.result-item')[index].classList.add('active'); 

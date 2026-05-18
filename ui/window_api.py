@@ -41,8 +41,8 @@ class WindowApi:
             self._load_config()
             current_group = self.config.get("current_group", "")
             if current_group:
-                # 先只加载当前分组需要的，unload_all_except 留给 switch_group
-                self._load_group_dicts(current_group)
+                for p in self.config.get("groups", {}).get(current_group, []):
+                    self.manager.load_mdx(p)
             self._refresh_ui()
         threading.Thread(target=task, daemon=True).start()
 
@@ -110,7 +110,8 @@ class WindowApi:
             new_group_paths = {os.path.abspath(p) for p in self.config.get("groups", {}).get(group_name, [])}
             def switch_task():
                 self.manager.unload_all_except(new_group_paths)
-                self._load_group_dicts(group_name)  # 替换原来的 for 循环
+                for p in self.config.get("groups", {}).get(group_name, []):
+                    self.manager.load_mdx(p)
                 self._auto_search_after_switch()
             threading.Thread(target=switch_task, daemon=True).start()
 
@@ -181,13 +182,21 @@ class WindowApi:
 
         # 不再在前端改写 HTML；由 <base> 改变相对路径的解析基准
         head_content = f'<base href="{base_url}">'
-        body_content = raw_html  # 原样嵌入即可
+        body_html = f'''<div id="mdx-content" style="padding: 8px; overflow: hidden;">
+    {raw_html}
+</div>'''
 
         resize_script = f'''<script>(function() {{
     var t="dict-iframe-{iframe_index}";
-    function s() {{ var h=Math.max(document.body.scrollHeight,document.documentElement.scrollHeight); window.parent.postMessage({{type:'resize',id:t,height:h}},'*'); }}
-    if(window.addEventListener) window.addEventListener("load", function(){{ s();}});
-    else window.attachEvent("onload", function(){{ s(); }});
+    function s() {{ 
+        var contentDiv = document.getElementById('mdx-content');
+        if (!contentDiv) return;
+        // offsetHeight 是最稳定的高度，不受 body margin 塌陷和默认边距影响
+        var h = contentDiv.offsetHeight; 
+        window.parent.postMessage({{type:'resize',id:t,height:h}},'*'); 
+    }}
+    if(window.addEventListener) window.addEventListener("load", function(){{ s() }});
+    else window.attachEvent("onload", function(){{ s() }});
     window.addEventListener("message", function(e){{ if(e.data==='calcHeight') setTimeout(s,50); }});
 }})();</script>'''
         
@@ -218,7 +227,12 @@ class WindowApi:
 </script>
 '''
 
-        return f'''<!DOCTYPE html><html style="font-size: 24px;"><head><meta charset="UTF-8">{head_content}</head><body>{body_content}{resize_script}{entry_script}</body></html>'''
+        return f'''<!DOCTYPE html><html style="font-size: 24px; height: auto;"><head><meta charset="UTF-8">{head_content}</head>
+<body style="margin: 0; padding: 0; height: auto; overflow: hidden;">
+{body_html}
+{resize_script}
+{entry_script}
+</body></html>'''
 
     # ==================== 分组管理界面 ====================
     def init_group_view(self):
@@ -361,44 +375,4 @@ class WindowApi:
             info_str = (f"<p><b>词典ID:</b> <code>{html_module.escape(dict_id)}</code></p>"
                         f"<p><b>文件路径:</b> <code>{html_module.escape(target.get('id', '未知'))}</code></p>")
             self.window.evaluate_js(f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
-
-    def _load_group_dicts(self, group_name: str):
-        """加载指定分组的词典，失败则自动从配置中移除"""
-        if not group_name:
-            return
-        group_paths = list(self.config.get("groups", {}).get(group_name, []))
-        for p in group_paths:
-            abs_p = os.path.abspath(p)
-            if not self.manager.load_mdx(p):
-                self._remove_invalid_dict(abs_p)
-
-    def _remove_invalid_dict(self, abs_path: str):
-        """从全部词典和当前分组中移除无效词典"""
-        removed = False
-
-        # 1. 从 all_dicts 移除
-        all_dicts = self.config.get("all_dicts", [])
-        before = len(all_dicts)
-        self.config["all_dicts"] = [d for d in all_dicts if os.path.abspath(d.get("id", "")) != abs_path]
-        if len(self.config["all_dicts"]) < before:
-            removed = True
-            print(f"[配置清理] 从全部词典移除: {abs_path}")
-
-        # 2. 从当前分组移除
-        current_group = self.config.get("current_group", "")
-        if current_group:
-            dict_list = self.config.get("groups", {}).get(current_group, [])
-            if abs_path in dict_list:
-                dict_list.remove(abs_path)
-                removed = True
-                print(f"[配置清理] 从分组 [{current_group}] 移除: {abs_path}")
-
-        # 3. 从 excluded 移除（如果存在）
-        excluded = self.config.get("excluded", [])
-        if abs_path in excluded:
-            excluded.remove(abs_path)
-            removed = True
-
-        if removed:
-            self._save_config()
-            self._refresh_ui()
+            
