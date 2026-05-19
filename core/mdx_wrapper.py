@@ -2,8 +2,11 @@
 import os
 from typing import List, Dict, Optional
 from libs.readmdict import CachedMDX, CachedMDD
+from collections import OrderedDict
 
 class MdxWrapper:
+    MAX_ENTRY_CACHE = 200
+
     def __init__(self, mdx_path: str):
         self.mdx_path = mdx_path
         self.folder_path = os.path.dirname(mdx_path)
@@ -14,7 +17,8 @@ class MdxWrapper:
         self.mdd = None
         self.loaded = False
         self.variant_handler = None
-        self._entry_cache: Dict[tuple, str] = {}  # 修改：缓存键改为 (key, idx) 元组
+        self._entry_cache: OrderedDict[tuple, str] = OrderedDict()
+        self._cached_entry_count = None  # 缓存词条数
 
     def load(self, variant_handler=None) -> bool:
         # 新任务开始：空行分隔 + 显示路径
@@ -130,35 +134,27 @@ class MdxWrapper:
         return str(raw_value).strip() if raw_value else ''
 
     def _get_entry_count(self) -> int:
-        """
-        获取词典的词条总数
+        """获取词典的词条总数（缓存优化）"""
+        if self._cached_entry_count is not None:
+            return self._cached_entry_count
         
-        优先级：
-        1. 从 CachedMDX 的 _key_blocks_meta 缓存中计算（最准确）
-        2. 从 base_mdx._num_entries 获取（可能在某些情况下为0）
-        3. 返回 0 作为兜底
-        """
         try:
-            # 方法1：从缓存的 key blocks 元数据计算（推荐）
             if hasattr(self.mdx, '_key_blocks_meta') and self.mdx._key_blocks_meta:
                 total = sum(meta.get("count", 0) for meta in self.mdx._key_blocks_meta)
                 if total > 0:
+                    self._cached_entry_count = total
                     return total
-
-            # 方法2：从 base_mdx 获取（可能为0如果使用了缓存加载）
+            
             base_num = getattr(self.mdx.base_mdx, '_num_entries', 0)
             if base_num > 0:
+                self._cached_entry_count = base_num
                 return base_num
-
-            # 方法3：通过 len() 获取（如果实现了 __len__）
-            try:
-                return len(self.mdx.base_mdx)
-            except:
-                pass
-
+            
+            self._cached_entry_count = 0
             return 0
         except Exception as e:
             print(f"[调试] 获取词条数量失败: {e}")
+            self._cached_entry_count = 0
             return 0
 
     def search(self, keyword: str, use_variants: bool) -> list:
@@ -179,11 +175,13 @@ class MdxWrapper:
                         results.append((key, idx))
         return results
 
-    def get_content(self, key: str, idx: int = None) -> str:  # 修改：增加 idx 参数
-        # 优先使用 idx 获取，解决同名词条只加载第一条的问题
+    def get_content(self, key: str, idx: int = None) -> str:
         if idx is not None:
-            if (key, idx) in self._entry_cache:
-                return self._entry_cache[(key, idx)]
+            cache_key = (key, idx)
+            if cache_key in self._entry_cache:
+                self._entry_cache.move_to_end(cache_key)  # 标记最近使用
+                return self._entry_cache[cache_key]
+            
             c = self.mdx.get_by_index(idx)
             if not c:
                 return ""
@@ -193,19 +191,12 @@ class MdxWrapper:
                 if target_word:
                     target_html = self.get_content(target_word)
                     return target_html if target_html else f'<div style="padding:8px;color:#888;">🔗 参见词条：<b>{target_word}</b></div>'
-            self._entry_cache[(key, idx)] = c_stripped
+                
+            # 添加到缓存，超过限制时删除最旧的
+            self._entry_cache[cache_key] = c_stripped
+            if len(self._entry_cache) > self.MAX_ENTRY_CACHE:
+                self._entry_cache.popitem(last=False)
             return c_stripped
-
-        # 兼容旧调用：如果没有传 idx，退回只用 key 查询的逻辑
-        if key in self._entry_cache:
-            return self._entry_cache[key]
-        search_res = self.mdx.search_prefix(key, max_results=1)
-        if not search_res:
-            return ""
-        matched_key, idx = search_res[0]
-        if matched_key != key:
-            return ""
-        return self.get_content(key, idx)
     
     def close(self):
         if self.mdx:

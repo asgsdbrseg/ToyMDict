@@ -104,7 +104,11 @@ class DictionaryManager:
             if isinstance(data, str):
                 try:
                     return data.encode('utf-8')
-                except:
-                    return data.encode('gbk', errors='ignore')
+                except UnicodeEncodeError:  # 明确异常类型
+                    try:
+                        return data.encode('gbk', errors='ignore')
+                    except Exception as e:
+                        print(f"[警告] 编码转换失败: {e}")
+                        return data.encode('utf-8', errors='ignore')
             return data
         return None
