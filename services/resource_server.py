@@ -6,20 +6,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 from utils.resource_resolver import MdxResourceResolver
 from utils.path_helper import get_mime_type, safe_url_encode
-
-
-def _normalize_path(path: str) -> str:
-    """
-    将资源路径统一为小写、使用 / 分隔、去掉前导 /。
-    例如：
-      "\\css\\style.css"   -> "css/style.css"
-      "/\\font\\a.ttf"     -> "font/a.ttf"
-      "CSS\\STYLE.CSS"     -> "css/style.css"
-    """
-    path = unquote(path or "")
-    path = path.replace("\\", "/")
-    path = path.lstrip("/")
-    return path.lower()
+from utils.path_helper import normalize_resource_path
 
 
 class ResourceHandler(BaseHTTPRequestHandler):
@@ -66,7 +53,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
                 abs_id = os.path.abspath(dict_id)
                 wrapper = self.dict_manager.loaded_dicts.get(abs_id) if self.dict_manager else None
             if wrapper and wrapper.folder_path:
-                file_path = os.path.join(wrapper.folder_path, _normalize_path(path))
+                file_path = os.path.join(wrapper.folder_path, normalize_resource_path(path))
                 if os.path.isfile(file_path):
                     with open(file_path, "rb") as f:
                         data = f.read()
@@ -88,7 +75,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
                 if len(parts) == 2:
                     dict_id_raw, path_raw = parts
                     dict_id = unquote(dict_id_raw)
-                    path = _normalize_path(path_raw)  # 统一归一化
+                    path = normalize_resource_path(path_raw)
 
                     data, mime = self._resolve_resource(dict_id, path)
                     if data:
