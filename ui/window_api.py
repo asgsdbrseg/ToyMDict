@@ -5,6 +5,7 @@ import os
 import html as html_module
 from utils.path_helper import safe_url_encode
 from utils.resource_resolver import MdxResourceResolver
+import time
 
 class WindowApi:
     def __init__(self, window, manager, resource_server):
@@ -12,8 +13,11 @@ class WindowApi:
         self.manager = manager
         self.server = resource_server
         self._current_results = []
+        self._results_lock = threading.Lock()
         self.config = {}
         self._init_system()
+        self._save_timer = None
+        self._save_delay = 0.5  # 500ms 防抖
 
     # ==================== 配置读写 ====================
     def _load_config(self):
@@ -29,7 +33,16 @@ class WindowApi:
         self.config.setdefault("excluded", [])
         self.config.setdefault("current_group", "")
 
-    def _save_config(self):
+    def _schedule_save_config(self):
+        """延迟保存配置，避免频繁文件写入"""
+        if self._save_timer:
+            self._save_timer.cancel()
+        self._save_timer = threading.Timer(self._save_delay, self._save_config_now)
+        self._save_timer.daemon = True
+        self._save_timer.start()
+    
+    def _save_config_now(self):
+        """实际保存配置"""
         from services import storage
         if not isinstance(self.config.get("excluded"), list):
             self.config["excluded"] = []
@@ -55,23 +68,25 @@ class WindowApi:
             pass
 
     # ==================== 导入逻辑 ====================
+    def _load_mdx_batch(self, file_paths):
+        """统一的批量加载逻辑"""
+        existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
+        for p in file_paths:
+            abs_p = os.path.abspath(p)
+            if abs_p not in existing_ids:
+                name = os.path.splitext(os.path.basename(p))[0]
+                self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
+                self.manager.load_mdx(abs_p)
+        self._schedule_save_config()
+        self._refresh_ui()
+        self.window.evaluate_js("if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
+
     def open_file(self):
         try:
             from webview import FileDialog
             paths = self.window.create_file_dialog(FileDialog.OPEN, allow_multiple=True, file_types=('MDX (*.mdx)',))
             if paths:
-                def task(file_paths):
-                    for p in file_paths:
-                        abs_p = os.path.abspath(p)
-                        existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
-                        if abs_p not in existing_ids:
-                            name = os.path.splitext(os.path.basename(p))[0]
-                            self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
-                            self.manager.load_mdx(abs_p)
-                    self._save_config()
-                    self._refresh_ui()
-                    self.window.evaluate_js("if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
-                threading.Thread(target=task, args=(paths,), daemon=True).start()
+                threading.Thread(target=self._load_mdx_batch, args=(paths,), daemon=True).start()
         except Exception as e:
             print(e)
 
@@ -83,18 +98,7 @@ class WindowApi:
                 from utils.path_helper import find_mdx_files
                 mdx_files = find_mdx_files(folders[0])
                 if mdx_files:
-                    def task(files):
-                        for p in files:
-                            abs_p = os.path.abspath(p)
-                            existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
-                            if abs_p not in existing_ids:
-                                name = os.path.splitext(os.path.basename(p))[0]
-                                self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
-                                self.manager.load_mdx(abs_p)
-                        self._save_config()
-                        self._refresh_ui()
-                        self.window.evaluate_js("if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
-                    threading.Thread(target=task, args=(mdx_files,), daemon=True).start()
+                    threading.Thread(target=self._load_mdx_batch, args=(mdx_files,), daemon=True).start()
                 else:
                     print("该文件夹下未找到 MDX 文件")
         except Exception as e:
@@ -103,7 +107,7 @@ class WindowApi:
     # ==================== 分组切换与查询 ====================
     def switch_group(self, group_name: str):
         self.config["current_group"] = group_name if group_name else ""
-        self._save_config()
+        self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
         if group_name:
@@ -153,14 +157,17 @@ class WindowApi:
             self.window.evaluate_js(f"updateResults({json.dumps(filtered_results, ensure_ascii=False)})")
             if filtered_results and filtered_results[0]["key"] == keyword:
                 self.show_entry(0)
+            with self._results_lock:
+                self._current_results = filtered_results
         threading.Thread(target=task, daemon=True).start()
 
     def show_entry(self, index: int):
-        if index < 0 or index >= len(self._current_results):
-            return
-        item = self._current_results[index]
-        key = item["key"]
-        sources = item["sources"]
+        with self._results_lock:
+            if index < 0 or index >= len(self._current_results):
+                return
+            item = self._current_results[index]
+            key = item["key"]
+            sources = item["sources"]
 
         def task():
             render_list = []
@@ -273,7 +280,7 @@ class WindowApi:
     def add_group(self, name: str):
         groups = self.config.setdefault("groups", {})
         groups[name] = []
-        self._save_config()
+        self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
 
@@ -283,7 +290,7 @@ class WindowApi:
             return
         self.config.get("groups", {}).pop(current_group, None)
         self.config["current_group"] = ""
-        self._save_config()
+        self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
 
@@ -295,7 +302,7 @@ class WindowApi:
             if groups:
                 current_group = next(iter(groups.keys()), "")
                 self.config["current_group"] = current_group
-                self._save_config()
+                self._schedule_save_config()
                 self._refresh_ui()
             else:
                 self.window.evaluate_js("alert('请先新建一个分组！')")
@@ -307,7 +314,7 @@ class WindowApi:
             dict_list.append(abs_id)
             if abs_id in self.config.get("excluded", []):
                 self.config["excluded"].remove(abs_id)
-            self._save_config()
+            self._schedule_save_config()
             self.manager.load_mdx(abs_id)
         self.init_group_view()
 
@@ -319,7 +326,7 @@ class WindowApi:
         abs_id = os.path.abspath(dict_id)
         if abs_id in dict_list:
             dict_list.remove(abs_id)
-        self._save_config()
+        self._schedule_save_config()
         self.init_group_view()
 
     def exclude_dict(self, dict_id):
@@ -332,7 +339,7 @@ class WindowApi:
             dict_list.remove(abs_id)
         if abs_id not in self.config.get("excluded", []):
             self.config.setdefault("excluded", []).append(abs_id)
-        self._save_config()
+        self._schedule_save_config()
         try:
             self.manager.unload_mdx(abs_id)
         except Exception as e:
@@ -343,7 +350,7 @@ class WindowApi:
         abs_id = os.path.abspath(dict_id)
         if abs_id in self.config.get("excluded", []):
             self.config["excluded"].remove(abs_id)
-            self._save_config()
+            self._schedule_save_config()
             self.manager.load_mdx(abs_id)
         self.init_group_view()
 
@@ -364,7 +371,7 @@ class WindowApi:
             ids.pop(index); ids.insert(0, abs_id)
         elif action == 'bottom':
             ids.pop(index); ids.append(abs_id)
-        self._save_config()
+        self._schedule_save_config()
         self.init_group_view()
 
     def get_dict_info(self, dict_id):
