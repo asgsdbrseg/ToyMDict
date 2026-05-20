@@ -197,7 +197,18 @@ class MdxWrapper:
             if len(self._entry_cache) > self.MAX_ENTRY_CACHE:
                 self._entry_cache.popitem(last=False)
             return c_stripped
-    
+        
+        # 兼容旧调用：如果没有传 idx，退回只用 key 查询的逻辑
+        if key in self._entry_cache:
+            return self._entry_cache[key]
+        search_res = self.mdx.search_prefix(key, max_results=1)
+        if not search_res:
+            return ""
+        matched_key, idx = search_res[0]
+        if matched_key != key:
+            return ""
+        return self.get_content(key, idx)
+
     def close(self):
         if self.mdx:
             self.mdx.close()
