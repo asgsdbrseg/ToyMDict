@@ -39,3 +39,15 @@ def get_app_base_dir() -> str:
     else:
         # 开发环境：向上两级（从 utils/ → 根目录）
         return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    
+def normalize_resource_path(path: str) -> str:
+    """统一的资源路径规范化
+    
+    将路径转换为小写、正斜杠、去前导/
+    例如：\\css\\STYLE.CSS -> css/style.css
+    """
+    from urllib.parse import unquote
+    path = unquote(path or "")
+    path = path.replace("\\", "/")
+    path = path.lstrip("/")
+    return path.lower()

@@ -2,17 +2,16 @@
 import os
 import re
 from urllib.parse import quote, unquote
+from utils.path_helper import normalize_resource_path
 
 class MdxResourceResolver:
     """统一资源解析器：处理URL重写、安全检查、路由"""
     
     @staticmethod
     def check_path_safety(dict_id, path):
-        """防止路径穿越 (如 ../../etc/passwd)"""
         if not path or '..' in path:
             return False
-        # 规范化路径，防止反向斜杠等绕过
-        safe_path = path.lstrip('/\\').replace('\\', '/')
+        safe_path = normalize_resource_path(path)
         abs_dict_dir = os.path.dirname(os.path.abspath(dict_id))
         abs_resource = os.path.normpath(os.path.join(abs_dict_dir, safe_path))
         # 必须确保解析后的路径还在词典目录下
