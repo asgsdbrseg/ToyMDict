@@ -2,6 +2,7 @@
 import threading
 import json
 import os
+import re
 import html as html_module
 from utils.path_helper import safe_url_encode
 from utils.resource_resolver import MdxResourceResolver
@@ -184,6 +185,23 @@ class WindowApi:
         
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
         # 与资源服务器 /mdd/{dict_id}/{path:.*} 对齐的 base
+
+        # 1. 修复 HTML 属性中的绝对路径：src="/..." href="/..."
+        #    不处理 // 开头的协议相对路径，也不处理已有完整协议的 http://. ..
+        raw_html = re.sub(
+            r'(src|href)\s*=\s*(["\'])/(?![/])',
+            r'\1=\2',
+            raw_html
+        )
+        
+        # 2. 修复 CSS 中的 url(/...) url('/...') url("/...")
+        #    例如：background-image: url('/images/bg.png')
+        raw_html = re.sub(
+            r'url\(\s*(["\']?)/(?![/])',
+            r'url(\1',
+            raw_html
+        )
+
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
 
@@ -208,34 +226,65 @@ class WindowApi:
 }})();</script>'''
         
         entry_script = '''
-<script>
-(function() {
-  // 使用捕获阶段拦截，防止被其他事件覆盖
-  document.addEventListener('click', function(e) {
-    var a = e && e.target && e.target.closest('a');
-    if (!a) return;
-    var href = (a.getAttribute('href') || '').trim();
-    if (href.toLowerCase().startsWith('entry://')) {
-      e.preventDefault();
-      e.stopPropagation();
-      // 提取词条名并解码
-      var word = decodeURIComponent(href.substring(8));
-      // 去掉可能存在的锚点 (如 entry://word#anchor)
-      if (word.indexOf('#') !== -1) {
-        word = word.split('#')[0];
-      }
-      if (word) {
-        // 发送消息给主窗口
-        window.parent.postMessage({ type: 'entry-link', word: word }, '*');
-      }
-    }
-  }, true);
-})();
-</script>
-'''
+        <script>
+        (function() {
+            var currentAudio = null; // 维护一个全局音频对象，防止重叠播放
+            
+            // 使用捕获阶段拦截，防止被其他事件覆盖
+            document.addEventListener('click', function(e) {
+                var a = e && e.target && e.target.closest('a');
+                if (!a) return;
+                var href = (a.getAttribute('href') || '').trim();
+                
+                // ========== 1. 处理词条跳转 entry:// ==========
+                if (href.toLowerCase().startsWith('entry://')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    var word = decodeURIComponent(href.substring(8));
+                    if (word.indexOf('#') !== -1) {
+                        word = word.split('#')[0];
+                    }
+                    if (word) {
+                        window.parent.postMessage({ type: 'entry-link', word: word }, '*');
+                    }
+                }
+                
+                // ========== 2. 处理音频播放 sound:// ==========
+                else if (href.toLowerCase().startsWith('sound://')) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // 提取音频路径并解码 (如 shi4.mp3 或 audio/shi4.mp3)
+                    var soundPath = decodeURIComponent(href.substring(8));
+                    
+                    // 统一处理路径：去掉开头的斜杠，防止拼接出双斜杠
+                    if (soundPath.startsWith('/')) {
+                        soundPath = soundPath.substring(1);
+                    }
+                    
+                    // 利用 <base> 标签的特性，获取当前词典的资源服务器基础路径
+                    var baseUrl = document.baseURI; 
+                    var soundUrl = baseUrl + soundPath;
+                    
+                    // 如果有正在播放的音频，先停止
+                    if (currentAudio) {
+                        currentAudio.pause();
+                        currentAudio = null;
+                    }
+                    
+                    // 使用 HTML5 Audio 播放音频
+                    currentAudio = new Audio(soundUrl);
+                    currentAudio.play().catch(function(err) {
+                        console.error("音频播放失败:", err, "URL:", soundUrl);
+                    });
+                }
+            }, true);
+        })();
+        </script>
+        '''
 
         return f'''<!DOCTYPE html><html style="font-size: 24px; height: auto;"><head><meta charset="UTF-8">{head_content}</head>
-<body style="margin: 0; padding: 0; height: auto; overflow: hidden;">
+<body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw;">
 {body_html}
 {resize_script}
 {entry_script}
