@@ -89,6 +89,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
                             self.send_header("Content-Encoding", "gzip")
                             self.send_header("Cache-Control", "public, max-age=31536000")
                             self.send_header("Content-Length", str(len(compressed)))
+                            self.send_header('Access-Control-Allow-Origin', '*')
                             self.end_headers()
                             self.wfile.write(compressed)
                             return
@@ -97,6 +98,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
                             self.send_header("Content-Type", mime)
                             self.send_header("Cache-Control", "public, max-age=31536000")
                             self.send_header("Content-Length", str(len(data)))
+                            self.send_header('Access-Control-Allow-Origin', '*')
                             self.end_headers()
                             self.wfile.write(data)
                             return
@@ -104,10 +106,12 @@ class ResourceHandler(BaseHTTPRequestHandler):
 
             # 未匹配任何路由
             self.send_response(404)
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
         except Exception as e:
             print(f"资源服务器错误: {e}")
             self.send_response(500)
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
 
 
