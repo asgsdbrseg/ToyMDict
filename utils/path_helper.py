@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
+import mimetypes
 from urllib.parse import quote, unquote
 
 def safe_url_encode(path: str) -> str:
