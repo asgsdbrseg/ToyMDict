@@ -455,7 +455,6 @@ class MDX(MDict):
 
 
 # ========== 高性能缓存版 MDX 类 ==========
-CACHE_VERSION = 3  # 递增使旧缓存自动失效
 
 class CachedMDX:
     MAX_RECORD_CACHE = 5
@@ -465,42 +464,74 @@ class CachedMDX:
         self.fname = fname
         self.base_mdx = MDX(fname, build_index=False)
         self.encoding = encoding
-
         self._key_blocks_meta = []
         self._record_blocks_meta = []
         self._record_block_offset = 0
-
         self._record_cache = OrderedDict()
         self._key_cache = OrderedDict()
         self._file_lock = threading.RLock()
-        self._load_or_build_index()
-
-    def _get_cache_path(self):
-        return self.fname + ".meta.cache.json"
-
-    def _load_or_build_index(self):
-        cpath = self._get_cache_path()
-        if os.path.exists(cpath):
-            try:
-                with open(cpath, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                if data.get("ver") == CACHE_VERSION and data.get("fsize") == os.path.getsize(self.fname):
-                    self._key_blocks_meta = data["key_meta"]
-                    self._record_blocks_meta = data["rec_meta"]
-                    return
-            except Exception:
-                pass
         self._build_index()
-        try:
-            with open(cpath, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "ver": CACHE_VERSION,
-                    "fsize": os.path.getsize(self.fname),
-                    "key_meta": self._key_blocks_meta,
-                    "rec_meta": self._record_blocks_meta
-                }, f, ensure_ascii=False)
-        except Exception:
-            pass
+
+    def _decompress_key_block_info(self, m, kb_info_compressed):
+        """解压 key_block_info，复刻 _decode_key_block_info 的解压逻辑，但不解析内容"""
+        if m._version >= 2:
+            assert(kb_info_compressed[:4] == b'\x02\x00\x00\x00')
+            if m._encrypt & 0x02:
+                key = ripemd128(kb_info_compressed[4:8] + pack(b'<L', 0x3695))
+                kb_info_compressed = kb_info_compressed[:8] + _fast_decrypt(kb_info_compressed[8:], key)
+            key_block_info = zlib.decompress(kb_info_compressed[8:])
+            adler32 = unpack('>I', kb_info_compressed[4:8])[0]
+            assert(adler32 == zlib.adler32(key_block_info) & 0xffffffff)
+        else:
+            key_block_info = kb_info_compressed
+        return key_block_info
+
+    def _extract_key_block_meta(self, m, key_block_info):
+        """从【已解压的】key_block_info 中解析出 first, last, count, comp, decomp"""
+        if m._version >= 2:
+            byte_format, byte_width, text_term = '>H', 2, 1
+        else:
+            byte_format, byte_width, text_term = '>B', 1, 0
+
+        is_utf16 = (m._encoding == 'UTF-16')
+        char_width = 2 if is_utf16 else 1
+
+        meta_list = []
+        i = 0
+        while i < len(key_block_info):
+            # count
+            count = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
+            i += m._number_width
+
+            # first key
+            text_head_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
+            i += byte_width
+            text_head_bytes = key_block_info[i : i + (text_head_size + text_term) * char_width]
+            first_key = text_head_bytes.rstrip(b'\x00').decode('UTF-16' if is_utf16 else 'utf-8', errors='ignore')
+            i += (text_head_size + text_term) * char_width
+
+            # last key
+            text_tail_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
+            i += byte_width
+            text_tail_bytes = key_block_info[i : i + (text_tail_size + text_term) * char_width]
+            last_key = text_tail_bytes.rstrip(b'\x00').decode('UTF-16' if is_utf16 else 'utf-8', errors='ignore')
+            i += (text_tail_size + text_term) * char_width
+
+            # comp / decomp
+            comp_size = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
+            i += m._number_width
+            decomp_size = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
+            i += m._number_width
+
+            meta_list.append({
+                "count": count,
+                "first": first_key,
+                "last": last_key,
+                "comp": comp_size,
+                "decomp": decomp_size
+            })
+
+        return meta_list
 
     def _build_v3_index(self, m):
         with open(self.fname, 'rb') as f:
@@ -521,8 +552,7 @@ class CachedMDX:
                 else:
                     break
 
-        if key_data_offset is not None:
-            with open(self.fname, 'rb') as f:
+            if key_data_offset is not None:
                 f.seek(key_data_offset)
                 num_kb = m._read_int32(f)
                 _total_size = m._read_number(f)
@@ -547,8 +577,7 @@ class CachedMDX:
                         })
                 m._num_entries = total_count
 
-        if record_block_offset is not None:
-            with open(self.fname, 'rb') as f:
+            if record_block_offset is not None:
                 f.seek(record_block_offset)
                 num_rb = m._read_int32(f)
                 _total_size = m._read_number(f)
@@ -561,7 +590,7 @@ class CachedMDX:
                         "comp": comp_size,
                         "decomp": decomp_size
                     })
-            f.seek(comp_size, 1)
+                    f.seek(comp_size, 1)
 
     def _build_index(self):
         with self._file_lock:
@@ -577,11 +606,10 @@ class CachedMDX:
                 if m._encrypt & 1:
                     block = _salsa_decrypt(block, m._encrypted_key)
                 sf = BytesIO(block)
-                m._read_number(sf)
+                m._read_number(sf)  # num_key_blocks
                 m._num_entries = m._read_number(sf)
-
                 if m._version >= 2.0:
-                    m._read_number(sf)
+                    m._read_number(sf)  # key_block_info_decomp_size
                     kb_info_size = m._read_number(sf)
                     kb_size = m._read_number(sf)
                     f.read(4)
@@ -589,17 +617,34 @@ class CachedMDX:
                     kb_info_size = m._read_number(sf)
                     kb_size = m._read_number(sf)
 
-                kb_info = f.read(kb_info_size)
-                kb_info_list = m._decode_key_block_info(kb_info)
+                # 读取压缩的 key_block_info
+                kb_info_compressed = f.read(kb_info_size)
                 kb_data_start = f.tell()
-                kb_compressed = f.read(kb_size)
+                f.seek(kb_size, 1)  # 跳过 key block 压缩数据
+
                 self._record_block_offset = f.tell()
 
+                # 关键修复：先解压 key_block_info，再解析
+                key_block_info = self._decompress_key_block_info(m, kb_info_compressed)
+                kb_meta_list = self._extract_key_block_meta(m, key_block_info)
+
+                kb_data_offset = kb_data_start
+                for meta in kb_meta_list:
+                    self._key_blocks_meta.append({
+                        "first": meta["first"],
+                        "last": meta["last"],
+                        "count": meta["count"],
+                        "offset": kb_data_offset,
+                        "comp": meta["comp"],
+                        "decomp": meta["decomp"]
+                    })
+                    kb_data_offset += meta["comp"]
+
+                # 解析 record block info
                 num_rb = m._read_number(f)
                 m._read_number(f)
                 m._read_number(f)
                 m._read_number(f)
-
                 rec_info_list = []
                 for _ in range(num_rb):
                     c = m._read_number(f)
@@ -612,27 +657,6 @@ class CachedMDX:
                     self._record_blocks_meta.append({"offset": curr_rec_offset, "comp": c, "decomp": d})
                     curr_rec_offset += c
 
-            local_offset = 0
-            for comp_size, decomp_size in kb_info_list:
-                if comp_size == 0:
-                    continue
-                kb_data = m._decode_block(
-                    kb_compressed[local_offset: local_offset + comp_size],
-                    decomp_size
-                )
-                keys_in_block = m._split_key_block(kb_data)
-                if keys_in_block:
-                    # 【修复】_split_key_block 输出的是 utf-8 bytes，必须用 utf-8 解码
-                    self._key_blocks_meta.append({
-                        "first": keys_in_block[0][1].decode('utf-8', errors='ignore'),
-                        "last": keys_in_block[-1][1].decode('utf-8', errors='ignore'),
-                        "count": len(keys_in_block),
-                        "offset": kb_data_start + local_offset,
-                        "comp": comp_size,
-                        "decomp": decomp_size
-                    })
-                local_offset += comp_size
-
     def _get_key_block(self, meta_idx):
         if meta_idx in self._key_cache:
             self._key_cache.move_to_end(meta_idx)
@@ -642,11 +666,11 @@ class CachedMDX:
             with open(self.fname, 'rb') as f:
                 f.seek(meta["offset"])
                 kb_data = self.base_mdx._decode_block(f.read(meta["comp"]), meta["decomp"])
-            keys = self.base_mdx._split_key_block(kb_data)
-            self._key_cache[meta_idx] = keys
-            if len(self._key_cache) > self.MAX_KEY_CACHE:
-                self._key_cache.popitem(last=False)
-            return keys
+                keys = self.base_mdx._split_key_block(kb_data)
+                self._key_cache[meta_idx] = keys
+                if len(self._key_cache) > self.MAX_KEY_CACHE:
+                    self._key_cache.popitem(last=False)
+                return keys
 
     def _get_record_block(self, rec_idx):
         if rec_idx in self._record_cache:
@@ -657,32 +681,43 @@ class CachedMDX:
             with open(self.fname, 'rb') as f:
                 f.seek(meta["offset"])
                 block_data = self.base_mdx._decode_block(f.read(meta["comp"]), meta["decomp"])
-            self._record_cache[rec_idx] = block_data
-            if len(self._record_cache) > self.MAX_RECORD_CACHE:
-                self._record_cache.popitem(last=False)
-            return block_data
+                self._record_cache[rec_idx] = block_data
+                if len(self._record_cache) > self.MAX_RECORD_CACHE:
+                    self._record_cache.popitem(last=False)
+                return block_data
 
     def search_prefix(self, prefix, max_results=100):
         results = []
         prefix_lower = prefix.lower()
-        for idx, meta in enumerate(self._key_blocks_meta):
-            if meta["last"].lower() < prefix_lower:
-                continue
+
+        # 二分查找定位可能包含 prefix 的第一个 key block
+        lo, hi = 0, len(self._key_blocks_meta)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if self._key_blocks_meta[mid]["last"].lower() < prefix_lower:
+                lo = mid + 1
+            else:
+                hi = mid
+
+        base_abs_idx = sum(m["count"] for m in self._key_blocks_meta[:lo])
+        for idx in range(lo, len(self._key_blocks_meta)):
+            meta = self._key_blocks_meta[idx]
+            # 如果块的首个单词已经大于前缀且不是以前缀开头，后续块都不可能匹配
             if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
                 break
+
+            # 按需解压并加载 key block
             keys_block = self._get_key_block(idx)
-            base_abs_idx = sum(m["count"] for m in self._key_blocks_meta[:idx])
+
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                # 【修复】_split_key_block 输出的是 utf-8 bytes，必须用 utf-8 解码
                 key_str = key_bytes.decode('utf-8', errors='ignore')
                 if key_str.lower().startswith(prefix_lower):
                     results.append((key_str, base_abs_idx + local_idx))
-                    if len(results) >= max_results:
-                        return results
+                    if len(results) >= max_results: return results
                 elif key_str.lower() > prefix_lower and not key_str.lower().startswith(prefix_lower):
                     break
+            base_abs_idx += meta["count"]
         return results
-
 
     def get_by_index(self, abs_idx):
         with self._file_lock:
@@ -692,7 +727,6 @@ class CachedMDX:
                     keys_block = self._get_key_block(i)
                     local_idx = abs_idx - accumulated
                     record_start_offset = keys_block[local_idx][0]
-                    
                     rec_accumulated = 0
                     target_rb_idx = len(self._record_blocks_meta) - 1
                     for j, rb_meta in enumerate(self._record_blocks_meta):
@@ -700,30 +734,23 @@ class CachedMDX:
                             target_rb_idx = j
                             break
                         rec_accumulated += rb_meta["decomp"]
-                    
                     rec_block = self._get_record_block(target_rb_idx)
                     rb_start_offset = sum(m["decomp"] for m in self._record_blocks_meta[:target_rb_idx])
                     rb_end_offset = rb_start_offset + len(rec_block)
-                    
-                    # 【修复】：精准计算 end_offset，解决“加载下一区块内容”的问题
+
                     if local_idx + 1 < len(keys_block):
-                        # 下一个词条在同一个 key_block 中
                         end_offset = keys_block[local_idx + 1][0]
                     else:
-                        # 当前词条是 key_block 的最后一条，需要去下一个 key_block 找下一个词条的起始偏移
                         end_offset = rb_end_offset
                         for next_i in range(i + 1, len(self._key_blocks_meta)):
                             next_keys_block = self._get_key_block(next_i)
                             if next_keys_block:
                                 next_start = next_keys_block[0][0]
-                                # 如果下一个词条的起始偏移还在当前 record_block 内，则用它作为结束边界
                                 if next_start < rb_end_offset:
                                     end_offset = next_start
-                                break
-                    
-                    # 安全保底：绝不能超过 record_block 的物理边界
-                    if end_offset > rb_end_offset:
-                        end_offset = rb_end_offset
+                                    break
+                        if end_offset > rb_end_offset:
+                            end_offset = rb_end_offset
 
                     data = rec_block[record_start_offset - rb_start_offset: end_offset - rb_start_offset]
                     return self.base_mdx._treat_record_data(data)
