@@ -763,7 +763,6 @@ class CachedMDX:
 
 
 # ========== 高性能缓存版 MDD 类 ==========
-
 class CachedMDD:
     MAX_CACHE = 10
 
@@ -772,80 +771,17 @@ class CachedMDD:
         self.base_mdd = MDD(fname, build_index=False)
         self.encoding = encoding
         self._record_blocks_meta = []
-        self._key_blocks_meta = []      # 新增：MDD 的 key block 块级索引
         self._record_cache = OrderedDict()
-        self._key_cache = OrderedDict() # 新增：缓存最近解压的 key block
         self._file_lock = threading.RLock()
-        self._build_index()
+
+        self._normalized_map = {}
+        self._offsets = []
+        self._build_path_index()
 
     def _normalize_path(self, path):
-        """路径规范化：统一斜杠、去前导斜杠、转小写"""
-        if not path:
-            return ""
-        path = path.replace("\\", "/")
-        while path.startswith("/"):
-            path = path[1:]
-        return path.lower()
+        return path.lower().replace('\\', '/').lstrip('/')
 
-    def _decompress_key_block_info(self, m, kb_info_compressed):
-        """解压 key_block_info（与 CachedMDX 逻辑一致）"""
-        if m._version >= 2:
-            assert(kb_info_compressed[:4] == b'\x02\x00\x00\x00')
-            if m._encrypt & 0x02:
-                key = ripemd128(kb_info_compressed[4:8] + pack(b'<L', 0x3695))
-                kb_info_compressed = kb_info_compressed[:8] + _fast_decrypt(kb_info_compressed[8:], key)
-            key_block_info = zlib.decompress(kb_info_compressed[8:])
-            adler32 = unpack('>I', kb_info_compressed[4:8])[0]
-            assert(adler32 == zlib.adler32(key_block_info) & 0xffffffff)
-        else:
-            key_block_info = kb_info_compressed
-        return key_block_info
-
-    def _extract_key_block_meta(self, m, key_block_info):
-        """从【已解压的】key_block_info 中解析出 first, last, count, comp, decomp"""
-        if m._version >= 2:
-            byte_format, byte_width, text_term = '>H', 2, 1
-        else:
-            byte_format, byte_width, text_term = '>B', 1, 0
-
-        is_utf16 = (m._encoding == 'UTF-16')
-        char_width = 2 if is_utf16 else 1
-
-        meta_list = []
-        i = 0
-        while i < len(key_block_info):
-            count = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
-            i += m._number_width
-
-            text_head_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
-            i += byte_width
-            text_head_bytes = key_block_info[i : i + (text_head_size + text_term) * char_width]
-            first_key = text_head_bytes.rstrip(b'\x00').decode('UTF-16' if is_utf16 else 'utf-8', errors='ignore')
-            i += (text_head_size + text_term) * char_width
-
-            text_tail_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
-            i += byte_width
-            text_tail_bytes = key_block_info[i : i + (text_tail_size + text_term) * char_width]
-            last_key = text_tail_bytes.rstrip(b'\x00').decode('UTF-16' if is_utf16 else 'utf-8', errors='ignore')
-            i += (text_tail_size + text_term) * char_width
-
-            comp_size = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
-            i += m._number_width
-            decomp_size = unpack(m._number_format, key_block_info[i:i+m._number_width])[0]
-            i += m._number_width
-
-            # MDD 路径统一按小写存储，方便后续匹配
-            meta_list.append({
-                "count": count,
-                "first": self._normalize_path(first_key),
-                "last": self._normalize_path(last_key),
-                "comp": comp_size,
-                "decomp": decomp_size
-            })
-
-        return meta_list
-
-    def _build_index(self):
+    def _build_path_index(self):
         m = self.base_mdd
         with open(self.fname, 'rb') as f:
             f.seek(m._key_block_offset)
@@ -854,10 +790,10 @@ class CachedMDD:
             if m._encrypt & 1:
                 block = _salsa_decrypt(block, m._encrypted_key)
             sf = BytesIO(block)
-            m._read_number(sf)  # num_key_blocks
-            m._read_number(sf)  # num_entries
+            m._read_number(sf)
+            m._read_number(sf)
             if m._version >= 2.0:
-                m._read_number(sf)  # key_block_info_decomp_size
+                m._read_number(sf)
                 kb_info_size = m._read_number(sf)
                 kb_size = m._read_number(sf)
                 f.read(4)
@@ -865,135 +801,83 @@ class CachedMDD:
                 kb_info_size = m._read_number(sf)
                 kb_size = m._read_number(sf)
 
-            kb_info_compressed = f.read(kb_info_size)
+            kb_info = f.read(kb_info_size)
+            kb_info_list = m._decode_key_block_info(kb_info)
+
             kb_data_start = f.tell()
-            f.seek(kb_size, 1)  # 核心优化：跳过 key block 压缩数据
+            kb_compressed = f.read(kb_size)
 
-            # 解析 key_block_info
-            key_block_info = self._decompress_key_block_info(m, kb_info_compressed)
-            kb_meta_list = self._extract_key_block_meta(m, key_block_info)
-
-            kb_data_offset = kb_data_start
-            for meta in kb_meta_list:
-                self._key_blocks_meta.append({
-                    "first": meta["first"],
-                    "last": meta["last"],
-                    "count": meta["count"],
-                    "offset": kb_data_offset,
-                    "comp": meta["comp"],
-                    "decomp": meta["decomp"]
-                })
-                kb_data_offset += meta["comp"]
-
-            # 解析 record_block_info
             num_rb = m._read_number(f)
             m._read_number(f)
             m._read_number(f)
             m._read_number(f)
+
             rec_info_list = []
             for _ in range(num_rb):
                 c = m._read_number(f)
                 d = m._read_number(f)
                 rec_info_list.append((c, d))
-
             rec_data_start = f.tell()
+
             curr_rec_offset = rec_data_start
             for c, d in rec_info_list:
                 self._record_blocks_meta.append({"offset": curr_rec_offset, "comp": c, "decomp": d})
                 curr_rec_offset += c
 
-    def _get_key_block(self, meta_idx):
-        """按需读取并解压 key block"""
-        if meta_idx in self._key_cache:
-            self._key_cache.move_to_end(meta_idx)
-            return self._key_cache[meta_idx]
-        with self._file_lock:
-            meta = self._key_blocks_meta[meta_idx]
-            with open(self.fname, 'rb') as f:
-                f.seek(meta["offset"])
-                kb_data = self.base_mdd._decode_block(f.read(meta["comp"]), meta["decomp"])
-                keys = self.base_mdd._split_key_block(kb_data)
-                self._key_cache[meta_idx] = keys
-                if len(self._key_cache) > self.MAX_CACHE:
-                    self._key_cache.popitem(last=False)
-                return keys
-
-    def _get_record_block(self, rec_idx):
-        """按需读取并解压 record block"""
-        if rec_idx in self._record_cache:
-            self._record_cache.move_to_end(rec_idx)
-            return self._record_cache[rec_idx]
-        with self._file_lock:
-            meta = self._record_blocks_meta[rec_idx]
-            with open(self.fname, 'rb') as f:
-                f.seek(meta["offset"])
-                block_data = self.base_mdd._decode_block(f.read(meta["comp"]), meta["decomp"])
-                self._record_cache[rec_idx] = block_data
-                if len(self._record_cache) > self.MAX_CACHE:
-                    self._record_cache.popitem(last=False)
-                return block_data
+        local_offset = 0
+        for comp, decomp in kb_info_list:
+            if comp == 0:
+                continue
+            kb_data = m._decode_block(
+                kb_compressed[local_offset: local_offset + comp],
+                decomp
+            )
+            keys = m._split_key_block(kb_data)
+            for rec_offset, key_bytes in keys:
+                # 【修复】_split_key_block 输出的是 utf-8 bytes，必须用 utf-8 解码
+                raw_key = key_bytes.decode('utf-8', errors='ignore')
+                self._normalized_map[self._normalize_path(raw_key)] = rec_offset
+                self._offsets.append(rec_offset)
+            local_offset += comp
+        self._offsets.sort()
 
     def get(self, path):
-        """根据路径获取资源内容（按需查找）"""
-        norm_path = self._normalize_path(path)
-        if not norm_path:
+        record_start_offset = self._normalized_map.get(self._normalize_path(path))
+        if record_start_offset is None:
             return None
 
-        # 1. 二分查找定位可能包含 norm_path 的 key block
-        lo, hi = 0, len(self._key_blocks_meta)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if self._key_blocks_meta[mid]["last"] < norm_path:
-                lo = mid + 1
+        with self._file_lock:
+            rec_accumulated = 0
+            target_rb_idx = -1
+            for i, meta in enumerate(self._record_blocks_meta):
+                if rec_accumulated + meta["decomp"] > record_start_offset:
+                    target_rb_idx = i
+                    break
+                rec_accumulated += meta["decomp"]
+            if target_rb_idx == -1:
+                return None
+
+            if target_rb_idx not in self._record_cache:
+                meta = self._record_blocks_meta[target_rb_idx]
+                with open(self.fname, 'rb') as f:
+                    f.seek(meta["offset"])
+                    self._record_cache[target_rb_idx] = self.base_mdd._decode_block(
+                        f.read(meta["comp"]), meta["decomp"]
+                    )
+                if len(self._record_cache) > self.MAX_CACHE:
+                    self._record_cache.popitem(last=False)
             else:
-                hi = mid
+                self._record_cache.move_to_end(target_rb_idx)
 
-        # 2. 遍历可能的 key block 查找精确匹配
-        for idx in range(lo, len(self._key_blocks_meta)):
-            meta = self._key_blocks_meta[idx]
-            # 如果块的首个路径已经大于目标路径，后续块不可能匹配
-            if meta["first"] > norm_path:
-                break
+            rec_block = self._record_cache[target_rb_idx]
+            rb_start_offset = sum(m["decomp"] for m in self._record_blocks_meta[:target_rb_idx])
 
-            # 按需加载 key block
-            keys_block = self._get_key_block(idx)
+            idx_in_offsets = bisect_left(self._offsets, record_start_offset)
+            record_end = (self._offsets[idx_in_offsets + 1]
+                          if idx_in_offsets < len(self._offsets) - 1
+                          else rb_start_offset + len(rec_block))
 
-            for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                key_str = key_bytes.decode('utf-8', errors='ignore')
-                if self._normalize_path(key_str) == norm_path:
-                    # 找到资源，定位 record block
-                    rec_accumulated = 0
-                    target_rb_idx = len(self._record_blocks_meta) - 1
-                    for j, rb_meta in enumerate(self._record_blocks_meta):
-                        if rec_accumulated + rb_meta["decomp"] > rec_offset:
-                            target_rb_idx = j
-                            break
-                        rec_accumulated += rb_meta["decomp"]
-
-                    rec_block = self._get_record_block(target_rb_idx)
-                    rb_start_offset = sum(m["decomp"] for m in self._record_blocks_meta[:target_rb_idx])
-                    rb_end_offset = rb_start_offset + len(rec_block)
-
-                    # 计算 end_offset（精准截取，防止读到下一条资源）
-                    if local_idx + 1 < len(keys_block):
-                        end_offset = keys_block[local_idx + 1][0]
-                    else:
-                        end_offset = rb_end_offset
-                        for next_i in range(idx + 1, len(self._key_blocks_meta)):
-                            next_keys_block = self._get_key_block(next_i)
-                            if next_keys_block:
-                                next_start = next_keys_block[0][0]
-                                if next_start < rb_end_offset:
-                                    end_offset = next_start
-                                break
-                    
-                    if end_offset > rb_end_offset:
-                        end_offset = rb_end_offset
-
-                    data = rec_block[rec_offset - rb_start_offset: end_offset - rb_start_offset]
-                    return data
-        return None
+            return rec_block[record_start_offset - rb_start_offset: record_end - rb_start_offset]
 
     def close(self):
         self._record_cache.clear()
-        self._key_cache.clear()
