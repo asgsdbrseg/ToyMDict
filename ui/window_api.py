@@ -184,6 +184,8 @@ class WindowApi:
         threading.Thread(target=task, daemon=True).start()
         
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
+        # 与资源服务器 /mdd/{dict_id}/{path:.*} 对齐的 base
+
         # 1. 修复 HTML 属性中的绝对路径：src="/..." href="/..."
         #    不处理 // 开头的协议相对路径，也不处理已有完整协议的 http://. ..
         raw_html = re.sub(
@@ -199,8 +201,7 @@ class WindowApi:
             r'url(\1',
             raw_html
         )
-        
-        # 与资源服务器 /mdd/{dict_id}/{path:.*} 对齐的 base
+
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
 
