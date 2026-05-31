@@ -4,39 +4,39 @@ HTML_TEMPLATE = """
 <head> 
     <meta charset="UTF-8"> 
     <style> 
-        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Microsoft YaHei', sans-serif; } 
-        body { display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; } 
+        * { box-sizing: border-box; margin: 0; padding: 0; } 
+        body { display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; font-size: 16px; } 
         .toolbar { display: flex; align-items: center; padding: 8px 15px; background: #fff; border-bottom: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.05); z-index: 10; } 
         .menu-container { position: relative; margin-right: 20px; } 
-        .menu-btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 18px; cursor: pointer; font-size: 14px; height: 36px; line-height: 1; transition: all 0.2s ease; }
+        .menu-btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 18px; cursor: pointer; height: 36px; line-height: 1; transition: all 0.2s ease; }
         .menu-btn:hover { background: #45a049; box-shadow: 0 2px 4px rgba(0,0,0,0.15); }
         .menu-btn:active { transform: translateY(1px); }
         .dropdown { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.12); min-width: 150px; z-index: 100; margin-top: 4px; }
         .dropdown.show { display: block; }
-        .dropdown-item { padding: 10px 15px; cursor: pointer; font-size: 14px; color: #333; transition: background 0.15s; }
+        .dropdown-item { padding: 10px 15px; cursor: pointer; color: #333; transition: background 0.15s; }
         .dropdown-item:hover { background: #f5f5f5; }
         .group-selector { margin-right: 20px; display: flex; align-items: center; background: #2196F3; border-radius: 20px; overflow: hidden; height: 36px; border: none; box-shadow: 0 1px 3px rgba(33,150,243,0.2); }
-        .group-label { padding: 8px 14px; color: #2196F3; font-size: 14px; cursor: pointer; background: white; height: 100%; display: flex; align-items: center; justify-content: center; transition: all 0.2s; user-select: none; font-weight: 500; border: 3px solid #2196F3; border-radius: 17px; margin: 1.5px; }
+        .group-label { padding: 8px 14px; color: #2196F3; cursor: pointer; background: white; height: 100%; display: flex; align-items: center; justify-content: center; transition: all 0.2s; user-select: none; font-weight: 500; border: 3px solid #2196F3; border-radius: 17px; margin: 1.5px; }
         .group-label:hover { background: #f8f9fa; color: #1976D2; }
-        .group-selector select { padding: 4px 24px 4px 8px; border: none; font-size: 13px; outline: none; height: 100%; cursor: pointer; background: transparent; color: white; min-width: 70px; appearance: none; text-align: center; text-align-last: center; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 4px center; background-size: 12px; }
+        .group-selector select { padding: 4px 24px 4px 8px; border: none; outline: none; height: 100%; cursor: pointer; background: transparent; color: white; min-width: 70px; appearance: none; text-align: center; text-align-last: center; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 4px center; background-size: 12px; }
         .group-selector select option { background: #fff; color: #333; }
         .group-selector:hover { background: #1976D2; box-shadow: 0 2px 6px rgba(33,150,243,0.35); }
         .search-box { flex: 1; display: flex; align-items: center; background: #f5f5f5; border-radius: 20px; padding: 0 12px; border: 1px solid #e0e0e0; transition: all 0.2s ease; }
         .search-box:hover, .search-box:focus-within { background: #fff; border-color: #4CAF50; box-shadow: 0 0 0 3px rgba(76,175,80,0.1); }
-        .search-box input { flex: 1; border: none; background: transparent; padding: 10px 8px; font-size: 14px; outline: none; color: #333; }
+        .search-box input { flex: 1; border: none; background: transparent; padding: 10px 8px; outline: none; color: #333; }
         .search-box input::placeholder { color: #999; }
-        .search-btn { padding: 6px 14px; margin-left: 4px; background: linear-gradient(135deg, #4CAF50, #45a049); color: white; border: none; border-radius: 16px; cursor: pointer; font-size: 13px; font-weight: 500; white-space: nowrap; transition: all 0.2s ease; display: flex; align-items: center; gap: 5px; height: 32px; }
+        .search-btn { padding: 6px 14px; margin-left: 4px; background: linear-gradient(135deg, #4CAF50, #45a049); color: white; border: none; border-radius: 16px; cursor: pointer; font-weight: 500; white-space: nowrap; transition: all 0.2s ease; display: flex; align-items: center; gap: 5px; height: 32px; }
         .search-btn:hover { background: linear-gradient(135deg, #45a049, #3d8b40); box-shadow: 0 2px 6px rgba(76,175,80,0.35); transform: translateY(-1px); }
         .search-btn:active { transform: translateY(0); }
-        .variant-check { display: flex; align-items: center; margin-right: 15px; font-size: 13px; color: #555; cursor: pointer; white-space: nowrap; } 
+        .variant-check { display: flex; align-items: center; margin-right: 15px; color: #555; cursor: pointer; white-space: nowrap; } 
         .variant-check input { margin-right: 5px; } 
         .main-container { display: flex; flex: 1; overflow: hidden; } 
         .sidebar { width: 280px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; padding: 10px; } 
         .content-area { flex: 1; background: #fff; display: flex; flex-direction: column; } 
-        .result-item { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 14px; display: flex; justify-content: space-between; align-items: center; } 
+        .result-item { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 20px; display: flex; justify-content: space-between; align-items: center; } 
         .result-item:hover { background: #f9f9f9; } 
         .result-item.active { background: #e8f0fe; color: #1a73e8; } 
-        .result-meta { font-size: 11px; color: #888; white-space: nowrap; margin-left: 10px;} 
+        .result-meta { color: #888; white-space: nowrap; margin-left: 10px;} 
         iframe { flex: 1; border: none; width: 100%; } 
         .modal { display: none; position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; } 
         .modal-content { background: white; padding: 20px; border-radius: 8px; min-width: 300px; } 
@@ -46,30 +46,31 @@ HTML_TEMPLATE = """
         .btn-danger { background: #f44336; color: white; } 
         .group-view { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #fff; z-index: 1000; display: none; flex-direction: column; } 
         .group-header { display: flex; align-items: center; padding: 15px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; } 
-        .group-header h3 { margin-left: 20px; font-size: 16px; color: #333; } 
+        .group-header h3 { margin-left: 20px; color: #333; } 
         .btn-back { background: #6c757d; color: white; border: none; border-radius: 4px; padding: 8px 15px; cursor: pointer; } 
         .btn-back:hover { background: #5a6268; } 
         .group-container { display: flex; flex: 1; overflow: hidden; } 
         .group-panel { width: 50%; display: flex; flex-direction: column; border-right: 1px solid #dee2e6; } 
         .group-panel:last-child { border-right: none; } 
-        .group-panel-title { padding: 12px 15px; font-weight: bold; background: #f1f3f5; border-bottom: 1px solid #dee2e6; font-size: 14px; color: #495057; } 
+        .group-panel-title { padding: 12px 15px; font-weight: bold; background: #f1f3f5; border-bottom: 1px solid #dee2e6; color: #495057; } 
         .group-controls { padding: 15px; display: flex; gap: 10px; border-bottom: 1px solid #dee2e6; background: #fafafa; align-items: center; } 
-        .form-control { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; outline: none; font-size: 14px; } 
-        .btn-sm { padding: 6px 12px; border: 1px solid #ced4da; border-radius: 4px; background: #fff; cursor: pointer; font-size: 14px; } 
+        .form-control { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; outline: none; } 
+        .btn-sm { padding: 6px 12px; border: 1px solid #ced4da; border-radius: 4px; background: #fff; cursor: pointer; } 
         .btn-danger { background: #f44336; color: white; } 
         #allDictsList, #groupDictsList { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex: 1; } 
-        #allDictsList li, #groupDictsList li { padding: 10px 15px; border-bottom: 1px solid #f1f1f1; cursor: default; display: flex; justify-content: space-between; align-items: center; font-size: 14px; } 
+        #allDictsList li, #groupDictsList li { padding: 10px 15px; border-bottom: 1px solid #f1f1f1; cursor: default; display: flex; justify-content: space-between; align-items: center; } 
         #allDictsList li:hover, #groupDictsList li:hover { background: #e9ecef; } 
         .btn-group { display: flex; gap: 4px; align-items: center; } 
-        .action-btn { cursor: pointer; padding: 2px 6px; border-radius: 3px; font-size: 14px; user-select: none; font-family: sans-serif; } 
+        .action-btn { cursor: pointer; padding: 2px 6px; border-radius: 3px; user-select: none; font-family: sans-serif; } 
         .add-btn { color: #28a745; font-weight: bold; font-size: 20px; line-height: 1; } 
         .add-btn:hover { background: #e6f4ea; } 
         .sort-btn { color: #5f6368; background: #f1f3f4; border-radius: 4px; } 
         .sort-btn:hover { background: #e8eaed; } 
-        .remove-btn { color: #dc3545; font-weight: bold; cursor: pointer; padding: 0 5px; font-size: 16px; } 
+        .remove-btn { color: #dc3545; font-weight: bold; cursor: pointer; padding: 0 5px; } 
         .remove-btn:hover { color: #a71d2a; } 
         .dict-excluded span:first-child { color: #999; font-style: italic; } 
         .dict-summary {font-size: 20px; background: #d3d3d3;}
+        #searchInput {font-size: 20px;}
     </style> 
 </head> 
 <body> 
