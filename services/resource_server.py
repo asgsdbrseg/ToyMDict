@@ -26,9 +26,16 @@ class ResourceHandler(BaseHTTPRequestHandler):
             return len(data) >= 256
         return False
 
-    def _resolve_resource(self, dict_id, path):
+    def _resolve_resource(self, dict_id: str, path: str):
+        """
+        统一资源解析逻辑：
+        - 优先从 MDD 获取；
+        - 若 MDD 无数据，尝试从 MDX 同目录读取；
+        - 返回 (bytes, mime_type) 或 (None, None)
+        """
         data = MdxResourceResolver.resolve_resource(self.dict_manager, dict_id, path)
         if data:
+            # 转成 bytes
             if isinstance(data, str):
                 try:
                     data = data.encode("utf-8")
@@ -36,7 +43,25 @@ class ResourceHandler(BaseHTTPRequestHandler):
                     data = data.encode("gbk", errors="ignore")
             mime = get_mime_type(path) or "application/octet-stream"
             return data, mime
-        # 不再走本地文件兜底
+
+        # 本地文件兜底（MDX 同目录）
+        try:
+            from core.dictionary_manager import DictionaryManager as DM  # 避免循环导入，延迟导入
+            wrapper = DM.get_wrapper_by_path(dict_id) if hasattr(DM, "get_wrapper_by_path") else None
+            if not wrapper:
+                # 如果没有单例方法，可以从 dict_manager.loaded_dicts 里按路径找
+                abs_id = os.path.abspath(dict_id)
+                wrapper = self.dict_manager.loaded_dicts.get(abs_id) if self.dict_manager else None
+            if wrapper and wrapper.folder_path:
+                file_path = os.path.join(wrapper.folder_path, normalize_resource_path(path))
+                if os.path.isfile(file_path):
+                    with open(file_path, "rb") as f:
+                        data = f.read()
+                    mime = get_mime_type(path) or "application/octet-stream"
+                    return data, mime
+        except Exception as e:
+            print(f"[local fallback] error: {e}")
+
         return None, None
 
     def do_GET(self):
