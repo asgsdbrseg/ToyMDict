@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
 import sys
-import mimetypes
 from urllib.parse import quote, unquote
 
 def safe_url_encode(path: str) -> str:
@@ -14,28 +13,12 @@ def safe_url_encode(path: str) -> str:
 def get_mime_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     mime_map = {
-        '.css': 'text/css',
-        '.js': 'application/javascript',
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif',
-        '.svg': 'image/svg+xml',
-        '.ico': 'image/x-icon',
-        '.mp3': 'audio/mpeg',
-        '.ogg': 'audio/ogg',
-        '.wav': 'audio/wav',
-        '.mp4': 'video/mp4',
-        '.woff':  'font/woff',
-        '.woff2': 'font/woff2',
-        '.ttf':   'font/ttf',
-        '.otf':   'font/otf',
-        '.eot':   'application/vnd.ms-fontobject',
+        '.css': 'text/css', '.js': 'application/javascript',
+        '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+        '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.mp4': 'video/mp4',
     }
-    if ext in mime_map:
-        return mime_map[ext]
-    mime, _ = mimetypes.guess_type(filename)
-    return mime or 'application/octet-stream'
+    return mime_map.get(ext, 'application/octet-stream')
 
 def find_mdx_files(folder_path: str) -> list:
     """递归遍历文件夹获取所有 mdx 文件"""
