@@ -283,8 +283,8 @@ class WindowApi:
         </script>
         '''
 
-        return f'''<!DOCTYPE html><html style="font-size: 24px; height: auto;"><head><meta charset="UTF-8">{head_content}</head>
-<body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw;">
+        return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">{head_content}</head>
+<body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw; font-size: 24px;">
 {body_html}
 {resize_script}
 {entry_script}
