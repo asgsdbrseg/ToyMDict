@@ -166,15 +166,20 @@ HTML_TEMPLATE = """
             document.getElementById('groupSelect').innerHTML = optHtml; 
             document.getElementById('groupSelectGroupView').innerHTML = optHtml; 
         } 
-        function updateResults(results) { 
-            document.getElementById('resultList').innerHTML = results.map((r, i) => { 
-                const count = r.sources.length; 
-                return `<div class="result-item" onclick="showEntry(${i})"> 
-                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.key}</span> 
-                    <span class="result-meta">${count}</span> 
-                </div>`; 
-            }).join(''); 
-        } 
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        function updateResults(results) {
+            document.getElementById('resultList').innerHTML = results.map((r, i) => {
+                const count = r.sources.length;
+                return `<div class="result-item" onclick="showEntry(${i})">
+                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.key)}</span>
+                    <span class="result-meta">${count}</span>
+                </div>`;
+            }).join('');
+        }
         function setContent(dictDataArray) {
             const container = document.getElementById('contentArea');
             container.innerHTML = '';
