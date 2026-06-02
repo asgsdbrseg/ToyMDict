@@ -4,7 +4,7 @@ import json
 import os
 import re
 import html as html_module
-from utils.path_helper import safe_url_encode
+from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.resource_resolver import MdxResourceResolver
 import time
 
@@ -19,6 +19,10 @@ class WindowApi:
         self._init_system()
         self._save_timer = None
         self._save_delay = 0.5  # 500ms 防抖
+
+        # ===== 新增：加载自定义 CSS =====
+        self._custom_css = ""
+        self._load_custom_css()
 
     # ==================== 配置读写 ====================
     def _load_config(self):
@@ -47,6 +51,37 @@ class WindowApi:
         if not isinstance(self.config.get("excluded"), list):
             self.config["excluded"] = []
         storage.save_config(self.config)
+
+    # ==================== 自定义 CSS ====================
+
+    def _load_custom_css(self):
+        base_dir = get_app_base_dir()
+        custom_css_path = os.path.join(base_dir, "custom.css")
+        if not os.path.exists(custom_css_path):
+            print(f"[CSS] 未找到自定义样式文件: {custom_css_path}")
+            return
+        
+        with open(custom_css_path, 'r', encoding='utf8') as f:
+            self._custom_css = f.read()
+        print(f"[CSS] 已加载自定义样式: {custom_css_path} ")
+
+    def _inject_custom_css_to_framework(self):
+        """将自定义 CSS 注入主框架页面"""
+        if not self._custom_css:
+            return
+        try:
+            escaped_css = json.dumps(self._custom_css, ensure_ascii=False)
+            js_code = f"""
+                (function() {{
+                    var el = document.getElementById('custom-framework-css');
+                    if (el) {{
+                        el.textContent = {escaped_css};
+                    }}
+                }})();
+            """
+            self.window.evaluate_js(js_code)
+        except Exception as e:
+            print(f"[CSS] 注入框架CSS失败: {e}")
 
     # ==================== 无效路径清理 ====================
     def _cleanup_invalid_paths(self, invalid_paths: set):
@@ -110,6 +145,7 @@ class WindowApi:
                 if invalid_paths:
                     self._cleanup_invalid_paths(invalid_paths)
             self._refresh_ui()
+            self._inject_custom_css_to_framework()
         threading.Thread(target=task, daemon=True).start()
 
     def _refresh_ui(self):
@@ -265,9 +301,13 @@ class WindowApi:
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
         head_content = f'<base href="{base_url}">'
+
+        custom_css_tag = f'<style>{self._custom_css}</style>' if self._custom_css else ''
+
         body_html = f'''<div id="mdx-content" style="padding: 8px; overflow: hidden;">
             {raw_html}
         </div>'''
+
         resize_script = f'''<script>(function() {{
             var t="dict-iframe-{iframe_index}";
             function s() {{
@@ -282,6 +322,7 @@ class WindowApi:
                 if(e.data==='calcHeight') setTimeout(s,50);
             }});
         }})();</script>'''
+
         entry_script = '''
         <script>
         (function() {
@@ -312,7 +353,8 @@ class WindowApi:
         })();
         </script>
         '''
-        return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">{head_content}</head>
+
+        return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">{custom_css_tag}{head_content}</head>
         <body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw; font-size: 24px;">
         {body_html}
         {resize_script}

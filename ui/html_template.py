@@ -3,6 +3,7 @@ HTML_TEMPLATE = """
 <html lang="zh-CN"> 
 <head> 
     <meta charset="UTF-8"> 
+    <style id="custom-framework-css"></style>
     <style> 
         * { box-sizing: border-box; margin: 0; padding: 0; } 
         body { display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; font-size: 16px; } 
@@ -82,7 +83,7 @@ HTML_TEMPLATE = """
                 <div class="dropdown-item" onclick="pywebview.api.open_folder()">打开文件夹</div> 
             </div> 
         </div> 
-                <div class="group-selector">
+        <div class="group-selector">
             <span class="group-label" onclick="showGroupView()">词典分组</span>
             <select id="groupSelect" onchange="pywebview.api.switch_group(this.value)"></select>
         </div> 
