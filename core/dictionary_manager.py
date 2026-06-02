@@ -7,6 +7,7 @@ class DictionaryManager:
     def __init__(self):
         self.loaded_dicts: dict[str, MdxWrapper] = {}
         self._variant_handler = None
+        self._dict_config_path = None
         self._init_variant_handler()
 
     def _init_variant_handler(self):
@@ -36,6 +37,117 @@ class DictionaryManager:
             print(f"  {rule_count} 组规则, {char_count} 个字符")
         except Exception as e:
             print(f"加载异体字失败: {e}")
+
+    def set_dict_config_path(self, config_path: str):
+        """设置词典配置文件路径"""
+        self._dict_config_path = config_path
+
+    def _load_dict_config(self) -> dict:
+        """加载词典配置文件"""
+        if not self._dict_config_path or not os.path.exists(self._dict_config_path):
+            return None
+        try:
+            with open(self._dict_config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"加载词典配置失败: {e}")
+            return None
+
+    def _save_dict_config(self, config: dict):
+        """保存词典配置文件"""
+        if not self._dict_config_path:
+            return False
+        try:
+            with open(self._dict_config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=4)
+            return True
+        except Exception as e:
+            print(f"保存词典配置失败: {e}")
+            return False
+
+    def _remove_invalid_paths_from_config(self, invalid_paths: set):
+        """从配置文件中删除无效路径"""
+        if not invalid_paths:
+            return
+        
+        config = self._load_dict_config()
+        if not config:
+            return
+        
+        modified = False
+        
+        # 从 all_dicts 中删除
+        if "all_dicts" in config:
+            original_count = len(config["all_dicts"])
+            config["all_dicts"] = [
+                d for d in config["all_dicts"]
+                if os.path.abspath(d["id"]) not in invalid_paths
+            ]
+            if len(config["all_dicts"]) < original_count:
+                modified = True
+                print(f"[清理] 从 all_dicts 删除 {original_count - len(config['all_dicts'])} 个无效路径")
+        
+        # 从 groups 中删除
+        if "groups" in config:
+            for group_name, paths in config["groups"].items():
+                original_count = len(paths)
+                config["groups"][group_name] = [
+                    p for p in paths
+                    if os.path.abspath(p) not in invalid_paths
+                ]
+                if len(config["groups"][group_name]) < original_count:
+                    modified = True
+                    print(f"[清理] 从 groups['{group_name}'] 删除 {original_count - len(config['groups'][group_name])} 个无效路径")
+        
+        # 从 excluded 中删除
+        if "excluded" in config:
+            original_count = len(config["excluded"])
+            config["excluded"] = [
+                p for p in config["excluded"]
+                if os.path.abspath(p) not in invalid_paths
+            ]
+            if len(config["excluded"]) < original_count:
+                modified = True
+                print(f"[清理] 从 excluded 删除 {original_count - len(config['excluded'])} 个无效路径")
+        
+        if modified:
+            self._save_dict_config(config)
+
+    def load_group(self, group_name: str) -> bool:
+        """加载指定分组的词典，自动清理无效路径"""
+        config = self._load_dict_config()
+        if not config or "groups" not in config:
+            print(f"分组 '{group_name}' 不存在")
+            return False
+        
+        group_paths = config["groups"].get(group_name, [])
+        if not group_paths:
+            print(f"分组 '{group_name}' 为空")
+            return False
+        
+        # 加载词典并记录无效路径
+        invalid_paths = set()
+        loaded_count = 0
+        
+        for path in group_paths:
+            abs_path = os.path.abspath(path)
+            if not os.path.exists(abs_path):
+                print(f"[无效] 词典文件不存在: {path}")
+                invalid_paths.add(abs_path)
+                continue
+            
+            if self.load_mdx(path):
+                loaded_count += 1
+            else:
+                print(f"[失败] 加载词典失败: {path}")
+                invalid_paths.add(abs_path)
+        
+        # 自动清理无效路径
+        if invalid_paths:
+            self._remove_invalid_paths_from_config(invalid_paths)
+        
+        print(f"分组 '{group_name}' 加载完成: {loaded_count}/{len(group_paths)} 个词典")
+        return loaded_count > 0
 
     def load_mdx(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
