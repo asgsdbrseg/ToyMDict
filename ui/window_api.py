@@ -28,7 +28,6 @@ class WindowApi:
         except Exception as e:
             print(f"[DEBUG] 加载配置失败: {e}")
             self.config = {}
-
         self.config.setdefault("all_dicts", [])
         self.config.setdefault("groups", {})
         self.config.setdefault("excluded", [])
@@ -41,7 +40,7 @@ class WindowApi:
         self._save_timer = threading.Timer(self._save_delay, self._save_config_now)
         self._save_timer.daemon = True
         self._save_timer.start()
-    
+
     def _save_config_now(self):
         """实际保存配置"""
         from services import storage
@@ -49,14 +48,67 @@ class WindowApi:
             self.config["excluded"] = []
         storage.save_config(self.config)
 
+    # ==================== 无效路径清理 ====================
+    def _cleanup_invalid_paths(self, invalid_paths: set):
+        """从 all_dicts 和所有分组中删除无效路径"""
+        modified = False
+
+        # 从 all_dicts 中删除
+        if "all_dicts" in self.config:
+            original_count = len(self.config["all_dicts"])
+            self.config["all_dicts"] = [
+                d for d in self.config["all_dicts"]
+                if os.path.abspath(d["id"]) not in invalid_paths
+            ]
+            if len(self.config["all_dicts"]) < original_count:
+                modified = True
+                print(f"[清理] 从 all_dicts 删除 {original_count - len(self.config['all_dicts'])} 个无效路径")
+
+        # 从 groups 中删除（所有分组，不仅是当前分组）
+        if "groups" in self.config:
+            for group_name, paths in self.config["groups"].items():
+                original_count = len(paths)
+                self.config["groups"][group_name] = [
+                    p for p in paths
+                    if os.path.abspath(p) not in invalid_paths
+                ]
+                if len(self.config["groups"][group_name]) < original_count:
+                    modified = True
+                    print(f"[清理] 从 groups['{group_name}'] 删除 {original_count - len(self.config['groups'][group_name])} 个无效路径")
+
+        # 从 excluded 中删除
+        if "excluded" in self.config:
+            original_count = len(self.config["excluded"])
+            self.config["excluded"] = [
+                p for p in self.config["excluded"]
+                if os.path.abspath(p) not in invalid_paths
+            ]
+            if len(self.config["excluded"]) < original_count:
+                modified = True
+                print(f"[清理] 从 excluded 删除 {original_count - len(self.config['excluded'])} 个无效路径")
+
+        if modified:
+            self._schedule_save_config()
+
     # ==================== 系统初始化 ====================
     def _init_system(self):
         def task():
             self._load_config()
             current_group = self.config.get("current_group", "")
             if current_group:
-                for p in self.config.get("groups", {}).get(current_group, []):
-                    self.manager.load_mdx(p)
+                invalid_paths = set()
+                group_paths = self.config.get("groups", {}).get(current_group, [])
+                for p in group_paths:
+                    abs_p = os.path.abspath(p)
+                    if not os.path.exists(abs_p):
+                        print(f"[无效] 词典文件不存在: {p}")
+                        invalid_paths.add(abs_p)
+                    else:
+                        if not self.manager.load_mdx(p):
+                            print(f"[失败] 加载词典失败: {p}")
+                            invalid_paths.add(abs_p)
+                if invalid_paths:
+                    self._cleanup_invalid_paths(invalid_paths)
             self._refresh_ui()
         threading.Thread(target=task, daemon=True).start()
 
@@ -77,10 +129,11 @@ class WindowApi:
             if abs_p not in existing_ids:
                 name = os.path.splitext(os.path.basename(p))[0]
                 self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
-                self.manager.load_mdx(abs_p)
+            self.manager.load_mdx(abs_p)
         self._schedule_save_config()
         self._refresh_ui()
-        self.window.evaluate_js("if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
+        self.window.evaluate_js(
+            "if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
 
     def open_file(self):
         try:
@@ -113,11 +166,24 @@ class WindowApi:
         self.init_group_view()
         if group_name:
             new_group_paths = {os.path.abspath(p) for p in self.config.get("groups", {}).get(group_name, [])}
+
             def switch_task():
                 self.manager.unload_all_except(new_group_paths)
-                for p in self.config.get("groups", {}).get(group_name, []):
-                    self.manager.load_mdx(p)
+                invalid_paths = set()
+                group_paths = self.config.get("groups", {}).get(group_name, [])
+                for p in group_paths:
+                    abs_p = os.path.abspath(p)
+                    if not os.path.exists(abs_p):
+                        print(f"[无效] 词典文件不存在: {p}")
+                        invalid_paths.add(abs_p)
+                    else:
+                        if not self.manager.load_mdx(p):
+                            print(f"[失败] 加载词典失败: {p}")
+                            invalid_paths.add(abs_p)
+                if invalid_paths:
+                    self._cleanup_invalid_paths(invalid_paths)
                 self._auto_search_after_switch()
+
             threading.Thread(target=switch_task, daemon=True).start()
 
     def _auto_search_after_switch(self):
@@ -150,9 +216,9 @@ class WindowApi:
             results = self.manager.search(keyword, use_variants)
             filtered_results = []
             for r in results:
-                valid_sources = [s for s in r.get("sources", []) if os.path.abspath(s["dict_id"]) in allowed_ids]
+                valid_sources = [s for s in r.get("sources", [])
+                                 if os.path.abspath(s["dict_id"]) in allowed_ids]
                 if valid_sources:
-                    # 此时 valid_sources 里面已经包含了 idx 信息
                     filtered_results.append({"key": r["key"], "sources": valid_sources})
             self._current_results = filtered_results
             self.window.evaluate_js(f"updateResults({json.dumps(filtered_results, ensure_ascii=False)})")
@@ -160,6 +226,7 @@ class WindowApi:
                 self.show_entry(0)
             with self._results_lock:
                 self._current_results = filtered_results
+
         threading.Thread(target=task, daemon=True).start()
 
     def show_entry(self, index: int):
@@ -173,106 +240,69 @@ class WindowApi:
         def task():
             render_list = []
             for i, source in enumerate(sources):
-                idx = source.get("idx")  # 修改：获取精确的 idx
-                raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)  # 修改：传递 idx
+                idx = source.get("idx")
+                raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
                 if not raw_html:
                     continue
                 safe_html = self._build_complete_html(raw_html, source["dict_id"], i)
                 render_list.append({"dict_name": source["dict_name"], "html": safe_html})
             if render_list:
                 self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
-        threading.Thread(target=task, daemon=True).start()
-        
-    def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
-        # 与资源服务器 /mdd/{dict_id}/{path:.*} 对齐的 base
 
-        # 1. 修复 HTML 属性中的绝对路径：src="/..." href="/..."
-        #    不处理 // 开头的协议相对路径，也不处理已有完整协议的 http://. ..
+        threading.Thread(target=task, daemon=True).start()
+
+    def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
         raw_html = re.sub(
             r'(src|href)\s*=\s*(["\'])/(?![/])',
             r'\1=\2',
             raw_html
         )
-        
-        # 2. 修复 CSS 中的 url(/...) url('/...') url("/...")
-        #    例如：background-image: url('/images/bg.png')
         raw_html = re.sub(
             r'url\(\s*(["\']?)/(?![/])',
             r'url(\1',
             raw_html
         )
-
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
-
-        # 不再在前端改写 HTML；由 <base> 改变相对路径的解析基准
         head_content = f'<base href="{base_url}">'
         body_html = f'''<div id="mdx-content" style="padding: 8px; overflow: hidden;">
-    {raw_html}
-</div>'''
-
+            {raw_html}
+        </div>'''
         resize_script = f'''<script>(function() {{
-    var t="dict-iframe-{iframe_index}";
-    function s() {{ 
-        var contentDiv = document.getElementById('mdx-content');
-        if (!contentDiv) return;
-        // offsetHeight 是最稳定的高度，不受 body margin 塌陷和默认边距影响
-        var h = contentDiv.offsetHeight; 
-        window.parent.postMessage({{type:'resize',id:t,height:h}},'*'); 
-    }}
-    if(window.addEventListener) window.addEventListener("load", function(){{ s() }});
-    else window.attachEvent("onload", function(){{ s() }});
-    window.addEventListener("message", function(e){{ if(e.data==='calcHeight') setTimeout(s,50); }});
-}})();</script>'''
-        
+            var t="dict-iframe-{iframe_index}";
+            function s() {{
+                var contentDiv = document.getElementById('mdx-content');
+                if (!contentDiv) return;
+                var h = contentDiv.offsetHeight;
+                window.parent.postMessage({{type:'resize',id:t,height:h}},'*');
+            }}
+            if(window.addEventListener) window.addEventListener("load", function(){{ s() }});
+            else window.attachEvent("onload", function(){{ s() }});
+            window.addEventListener("message", function(e){{
+                if(e.data==='calcHeight') setTimeout(s,50);
+            }});
+        }})();</script>'''
         entry_script = '''
         <script>
         (function() {
-            var currentAudio = null; // 维护一个全局音频对象，防止重叠播放
-            
-            // 使用捕获阶段拦截，防止被其他事件覆盖
+            var currentAudio = null;
             document.addEventListener('click', function(e) {
                 var a = e && e.target && e.target.closest('a');
                 if (!a) return;
                 var href = (a.getAttribute('href') || '').trim();
-                
-                // ========== 1. 处理词条跳转 entry:// ==========
                 if (href.toLowerCase().startsWith('entry://')) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                    e.preventDefault(); e.stopPropagation();
                     var word = decodeURIComponent(href.substring(8));
-                    if (word.indexOf('#') !== -1) {
-                        word = word.split('#')[0];
-                    }
-                    if (word) {
-                        window.parent.postMessage({ type: 'entry-link', word: word }, '*');
-                    }
+                    if (word.indexOf('#') !== -1) { word = word.split('#')[0]; }
+                    if (word) { window.parent.postMessage({ type: 'entry-link', word: word }, '*'); }
                 }
-                
-                // ========== 2. 处理音频播放 sound:// ==========
                 else if (href.toLowerCase().startsWith('sound://')) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    
-                    // 提取音频路径并解码 (如 shi4.mp3 或 audio/shi4.mp3)
+                    e.preventDefault(); e.stopPropagation();
                     var soundPath = decodeURIComponent(href.substring(8));
-                    
-                    // 统一处理路径：去掉开头的斜杠，防止拼接出双斜杠
-                    if (soundPath.startsWith('/')) {
-                        soundPath = soundPath.substring(1);
-                    }
-                    
-                    // 利用 <base> 标签的特性，获取当前词典的资源服务器基础路径
-                    var baseUrl = document.baseURI; 
+                    if (soundPath.startsWith('/')) { soundPath = soundPath.substring(1); }
+                    var baseUrl = document.baseURI;
                     var soundUrl = baseUrl + soundPath;
-                    
-                    // 如果有正在播放的音频，先停止
-                    if (currentAudio) {
-                        currentAudio.pause();
-                        currentAudio = null;
-                    }
-                    
-                    // 使用 HTML5 Audio 播放音频
+                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
                     currentAudio = new Audio(soundUrl);
                     currentAudio.play().catch(function(err) {
                         console.error("音频播放失败:", err, "URL:", soundUrl);
@@ -282,13 +312,12 @@ class WindowApi:
         })();
         </script>
         '''
-
         return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">{head_content}</head>
-<body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw; font-size: 24px;">
-{body_html}
-{resize_script}
-{entry_script}
-</body></html>'''
+        <body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw; font-size: 24px;">
+        {body_html}
+        {resize_script}
+        {entry_script}
+        </body></html>'''
 
     # ==================== 分组管理界面 ====================
     def init_group_view(self):
@@ -305,11 +334,9 @@ class WindowApi:
                         "name": match_d.get("name", "未知词典") if match_d else "未知词典"
                     })
                 groups_data.append({"name": name, "dicts": dicts_in_group})
-
             current_group_name = self.config.get("current_group", "")
             current_active = set(os.path.abspath(p) for p in self.config.get("groups", {}).get(current_group_name, []))
             current_excluded = set(os.path.abspath(p) for p in self.config.get("excluded", []))
-
             all_dicts_with_state = []
             for d in all_dicts:
                 abs_id = os.path.abspath(d.get("id"))
@@ -320,7 +347,6 @@ class WindowApi:
                 else:
                     status = "none"
                 all_dicts_with_state.append({"id": abs_id, "name": d.get("name", ""), "status": status})
-
             js_code = f"renderGroupView({json.dumps(all_dicts_with_state, ensure_ascii=False)}, {json.dumps(groups_data, ensure_ascii=False)}, {json.dumps(current_group_name, ensure_ascii=False)})"
             self.window.evaluate_js(js_code)
         except Exception as e:
@@ -346,7 +372,6 @@ class WindowApi:
     def add_dict_to_group(self, dict_id):
         current_group = self.config.get("current_group", "")
         groups = self.config.setdefault("groups", {})
-
         if not current_group or current_group not in groups:
             if groups:
                 current_group = next(iter(groups.keys()), "")
@@ -356,7 +381,6 @@ class WindowApi:
             else:
                 self.window.evaluate_js("alert('请先新建一个分组！')")
                 return
-
         dict_list = groups[current_group]
         abs_id = os.path.abspath(dict_id)
         if abs_id not in dict_list:
@@ -365,7 +389,7 @@ class WindowApi:
                 self.config["excluded"].remove(abs_id)
             self._schedule_save_config()
             self.manager.load_mdx(abs_id)
-        self.init_group_view()
+            self.init_group_view()
 
     def remove_dict_from_group(self, dict_id):
         current_group = self.config.get("current_group", "")
@@ -375,8 +399,8 @@ class WindowApi:
         abs_id = os.path.abspath(dict_id)
         if abs_id in dict_list:
             dict_list.remove(abs_id)
-        self._schedule_save_config()
-        self.init_group_view()
+            self._schedule_save_config()
+            self.init_group_view()
 
     def exclude_dict(self, dict_id):
         current_group = self.config.get("current_group", "")
@@ -386,14 +410,14 @@ class WindowApi:
         abs_id = os.path.abspath(dict_id)
         if abs_id in dict_list:
             dict_list.remove(abs_id)
-        if abs_id not in self.config.get("excluded", []):
-            self.config.setdefault("excluded", []).append(abs_id)
-        self._schedule_save_config()
-        try:
-            self.manager.unload_mdx(abs_id)
-        except Exception as e:
-            print(f"卸载词典时发生异常(已忽略): {e}")
-        self.init_group_view()
+            if abs_id not in self.config.get("excluded", []):
+                self.config.setdefault("excluded", []).append(abs_id)
+            self._schedule_save_config()
+            try:
+                self.manager.unload_mdx(abs_id)
+            except Exception as e:
+                print(f"卸载词典时发生异常(已忽略): {e}")
+            self.init_group_view()
 
     def reload_excluded_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
@@ -401,7 +425,7 @@ class WindowApi:
             self.config["excluded"].remove(abs_id)
             self._schedule_save_config()
             self.manager.load_mdx(abs_id)
-        self.init_group_view()
+            self.init_group_view()
 
     def move_dict(self, dict_id: str, action: str):
         current_group = self.config.get("current_group", "")
@@ -413,9 +437,9 @@ class WindowApi:
             return
         index = ids.index(abs_id)
         if action == 'up' and index > 0:
-            ids[index], ids[index-1] = ids[index-1], ids[index]
+            ids[index], ids[index - 1] = ids[index - 1], ids[index]
         elif action == 'down' and index < len(ids) - 1:
-            ids[index], ids[index+1] = ids[index+1], ids[index]
+            ids[index], ids[index + 1] = ids[index + 1], ids[index]
         elif action == 'top':
             ids.pop(index); ids.insert(0, abs_id)
         elif action == 'bottom':
@@ -430,5 +454,5 @@ class WindowApi:
             title = target.get("name", "未知词典")
             info_str = (f"<p><b>词典ID:</b> <code>{html_module.escape(dict_id)}</code></p>"
                         f"<p><b>文件路径:</b> <code>{html_module.escape(target.get('id', '未知'))}</code></p>")
-            self.window.evaluate_js(f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
-            
+            self.window.evaluate_js(
+                f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
