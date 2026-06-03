@@ -191,7 +191,10 @@ class MdxWrapper:
                 self._entry_cache.move_to_end(cache_key)  # 标记最近使用
                 return self._entry_cache[cache_key]
 
-            c = self.mdx.get_by_index(idx)
+            try:
+                c = self.mdx.get_by_index(idx)
+            except Exception as e:
+                return f'<div style="padding:8px;color:red;">⚠ 内容解析失败：{e}</div>'
             if not c:
                 return ""
 
