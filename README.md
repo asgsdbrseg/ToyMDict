@@ -25,16 +25,16 @@
 
 与GoldenDict对比
 1. 只重衣衫不重人
-![只重衣衫不重人](./readme_img/SnowShot_2026-05-15_21-19-47.png)
-![只重衣衫不重人](./readme_img/SnowShot_2026-05-15_21-20-34.png)
+![只重衣衫不重人](./readme_img/SnowShot_2026-06-07_22-35-32.png)
+![只重衣衫不重人](./readme_img/SnowShot_2026-06-07_22-35-44.png)
 
 2. 堆垛
-![堆垛](./readme_img/SnowShot_2026-05-15_21-21-08.png)
-![堆垛](./readme_img/SnowShot_2026-05-15_21-21-21.png)
+![堆垛](./readme_img/SnowShot_2026-06-07_22-35-55.png)
+![堆垛](./readme_img/SnowShot_2026-06-07_22-36-04.png)
 
 3. 钱松岩
-![钱松岩](./readme_img/SnowShot_2026-05-15_21-27-51.png)
-![钱松岩](./readme_img/SnowShot_2026-05-15_21-28-03.png)
+![钱松岩](./readme_img/SnowShot_2026-06-07_22-36-19.png)
+![钱松岩](./readme_img/SnowShot_2026-06-07_22-36-29.png)
 
 4. 冲举
 ![冲举](./readme_img/SnowShot_2026-06-07_22-28-53.png)
