@@ -35,3 +35,7 @@
 3. 钱松岩
 ![钱松岩](./readme_img/SnowShot_2026-05-15_21-27-51.png)
 ![钱松岩](./readme_img/SnowShot_2026-05-15_21-28-03.png)
+
+4. 冲举
+![冲举](./readme_img/SnowShot_2026-06-07_22-28-53.png)
+![冲举](./readme_img/SnowShot_2026-06-07_22-30-47.png)
