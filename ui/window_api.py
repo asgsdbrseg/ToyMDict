@@ -445,21 +445,27 @@ class WindowApi:
             self.init_group_view()
 
     def exclude_dict(self, dict_id):
-        current_group = self.config.get("current_group", "")
-        if not current_group:
-            return
-        dict_list = self.config.get("groups", {}).get(current_group, [])
         abs_id = os.path.abspath(dict_id)
-        if abs_id in dict_list:
-            dict_list.remove(abs_id)
-            if abs_id not in self.config.get("excluded", []):
-                self.config.setdefault("excluded", []).append(abs_id)
-            self._schedule_save_config()
-            try:
-                self.manager.unload_mdx(abs_id)
-            except Exception as e:
-                print(f"卸载词典时发生异常(已忽略): {e}")
-            self.init_group_view()
+
+        # 从所有分组中移除该词典（不仅限当前分组）
+        for group_name, dict_list in self.config.get("groups", {}).items():
+            if abs_id in dict_list:
+                dict_list.remove(abs_id)
+
+        # 加入排除列表
+        if abs_id not in self.config.get("excluded", []):
+            self.config.setdefault("excluded", []).append(abs_id)
+
+        self._schedule_save_config()
+
+        # 从内存卸载
+        try:
+            self.manager.unload_mdx(abs_id)
+        except Exception as e:
+            print(f"卸载词典时发生异常(已忽略): {e}")
+
+        self.init_group_view()
+
 
     def reload_excluded_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
