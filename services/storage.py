@@ -15,8 +15,8 @@ def load_config():
                     "groups": data.get("groups", {}),
                     "current_group": data.get("current_group", "")
                 }
-        except:
-            pass
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            print(f"[storage] 加载配置失败，使用默认配置: {e}")
     return {"all_dicts": [], "groups": {}, "current_group": ""}
 
 def save_config(config: dict):

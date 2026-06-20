@@ -43,25 +43,6 @@ class ResourceHandler(BaseHTTPRequestHandler):
                     data = data.encode("gbk", errors="ignore")
             mime = get_mime_type(path) or "application/octet-stream"
             return data, mime
-
-        # 本地文件兜底（MDX 同目录）
-        try:
-            from core.dictionary_manager import DictionaryManager as DM  # 避免循环导入，延迟导入
-            wrapper = DM.get_wrapper_by_path(dict_id) if hasattr(DM, "get_wrapper_by_path") else None
-            if not wrapper:
-                # 如果没有单例方法，可以从 dict_manager.loaded_dicts 里按路径找
-                abs_id = os.path.abspath(dict_id)
-                wrapper = self.dict_manager.loaded_dicts.get(abs_id) if self.dict_manager else None
-            if wrapper and wrapper.folder_path:
-                file_path = os.path.join(wrapper.folder_path, normalize_resource_path(path))
-                if os.path.isfile(file_path):
-                    with open(file_path, "rb") as f:
-                        data = f.read()
-                    mime = get_mime_type(path) or "application/octet-stream"
-                    return data, mime
-        except Exception as e:
-            print(f"[local fallback] error: {e}")
-
         return None, None
 
     def do_GET(self):
@@ -124,15 +105,18 @@ class ResourceServer:
     def start(self):
         import threading
         ResourceHandler.dict_manager = self.dict_manager
-        for port in range(self.port, self.port + 50):
+        start_port = self.port
+        bound_port = None
+        for port in range(start_port, start_port + 50):
             try:
                 self.server = ThreadingHTTPServer(("localhost", port), ResourceHandler)
-                self.port = port
+                bound_port = port
                 break
             except OSError:
                 continue
         if not self.server:
-            raise RuntimeError("无法找到可用端口")
+            raise RuntimeError(f"无法在端口 {start_port}-{start_port + 49} 范围内找到可用端口")
+        self.port = bound_port  # 记录实际绑定端口供 window_api 使用
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
     def stop(self):
