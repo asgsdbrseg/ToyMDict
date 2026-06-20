@@ -470,14 +470,14 @@ class CachedMDX:
         self._record_blocks_meta = []
         self._record_block_offset = 0
 
-        # 前缀和：_key_count_prefix[i] = 前 i 个 key block 的词条数总和
-        # _rec_decomp_prefix[i] = 前 i 个 record block 的解压大小总和
         self._key_count_prefix = [0]
         self._rec_decomp_prefix = [0]
 
         self._record_cache = OrderedDict()
         self._key_cache = OrderedDict()
         self._file_lock = threading.RLock()
+        # 持久文件句柄，避免每次读取都 open/close
+        self._fh = open(self.fname, 'rb')
         self._load_or_build_index()
 
     def _get_cache_path(self):
@@ -657,9 +657,8 @@ class CachedMDX:
             return self._key_cache[meta_idx]
         with self._file_lock:
             meta = self._key_blocks_meta[meta_idx]
-            with open(self.fname, 'rb') as f:
-                f.seek(meta["offset"])
-                kb_data = self.base_mdx._decode_block(f.read(meta["comp"]), meta["decomp"])
+            self._fh.seek(meta["offset"])
+            kb_data = self.base_mdx._decode_block(self._fh.read(meta["comp"]), meta["decomp"])
             keys = self.base_mdx._split_key_block(kb_data)
             self._key_cache[meta_idx] = keys
             if len(self._key_cache) > self.MAX_KEY_CACHE:
@@ -672,9 +671,8 @@ class CachedMDX:
             return self._record_cache[rec_idx]
         with self._file_lock:
             meta = self._record_blocks_meta[rec_idx]
-            with open(self.fname, 'rb') as f:
-                f.seek(meta["offset"])
-                block_data = self.base_mdx._decode_block(f.read(meta["comp"]), meta["decomp"])
+            self._fh.seek(meta["offset"])
+            block_data = self.base_mdx._decode_block(self._fh.read(meta["comp"]), meta["decomp"])
             self._record_cache[rec_idx] = block_data
             if len(self._record_cache) > self.MAX_RECORD_CACHE:
                 self._record_cache.popitem(last=False)
@@ -687,18 +685,25 @@ class CachedMDX:
             if meta["last"].lower() < prefix_lower:
                 continue
             if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
+                # key 已排序，后续 block 的 first 都更大，不可能再匹配
                 break
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]  # O(1) 替代 O(n) 的 sum
+            stop_outer = False
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                # 【修复】_split_key_block 输出的是 utf-8 bytes，必须用 utf-8 解码
                 key_str = key_bytes.decode('utf-8', errors='ignore')
-                if key_str.lower().startswith(prefix_lower):
+                key_lower = key_str.lower()
+                if key_lower.startswith(prefix_lower):
                     results.append((key_str, base_abs_idx + local_idx))
                     if len(results) >= max_results:
                         return results
-                elif key_str.lower() > prefix_lower and not key_str.lower().startswith(prefix_lower):
+                elif key_lower > prefix_lower:
+                    # key 已排序，后续 key 都更大，不可能再匹配
+                    # 需同时退出内层和外层循环
+                    stop_outer = True
                     break
+            if stop_outer:
+                break
         return results
 
 
@@ -750,6 +755,10 @@ class CachedMDX:
     def close(self):
         self._record_cache.clear()
         self._key_cache.clear()
+        try:
+            self._fh.close()
+        except Exception:
+            pass
 
 
 # ========== 高性能缓存版 MDD 类 ==========
@@ -767,6 +776,8 @@ class CachedMDD:
         self._normalized_map = {}
         self._offsets = []
         self._rec_decomp_prefix = [0]  # 前缀和
+        # 持久文件句柄
+        self._fh = open(self.fname, 'rb')
         self._build_path_index()
 
     def _normalize_path(self, path):
@@ -848,11 +859,10 @@ class CachedMDD:
 
             if target_rb_idx not in self._record_cache:
                 meta = self._record_blocks_meta[target_rb_idx]
-                with open(self.fname, 'rb') as f:
-                    f.seek(meta["offset"])
-                    self._record_cache[target_rb_idx] = self.base_mdd._decode_block(
-                        f.read(meta["comp"]), meta["decomp"]
-                    )
+                self._fh.seek(meta["offset"])
+                self._record_cache[target_rb_idx] = self.base_mdd._decode_block(
+                    self._fh.read(meta["comp"]), meta["decomp"]
+                )
                 if len(self._record_cache) > self.MAX_CACHE:
                     self._record_cache.popitem(last=False)
             else:
@@ -870,3 +880,7 @@ class CachedMDD:
 
     def close(self):
         self._record_cache.clear()
+        try:
+            self._fh.close()
+        except Exception:
+            pass
