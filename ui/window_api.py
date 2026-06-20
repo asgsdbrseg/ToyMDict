@@ -95,40 +95,40 @@ class WindowApi:
     def _cleanup_invalid_paths(self, invalid_paths: set):
         """从 all_dicts 和所有分组中删除无效路径"""
         modified = False
+        with self._config_lock:
+            # 从 all_dicts 中删除
+            if "all_dicts" in self.config:
+                original_count = len(self.config["all_dicts"])
+                self.config["all_dicts"] = [
+                    d for d in self.config["all_dicts"]
+                    if os.path.abspath(d["id"]) not in invalid_paths
+                ]
+                if len(self.config["all_dicts"]) < original_count:
+                    modified = True
+                    print(f"[清理] 从 all_dicts 删除 {original_count - len(self.config['all_dicts'])} 个无效路径")
 
-        # 从 all_dicts 中删除
-        if "all_dicts" in self.config:
-            original_count = len(self.config["all_dicts"])
-            self.config["all_dicts"] = [
-                d for d in self.config["all_dicts"]
-                if os.path.abspath(d["id"]) not in invalid_paths
-            ]
-            if len(self.config["all_dicts"]) < original_count:
-                modified = True
-                print(f"[清理] 从 all_dicts 删除 {original_count - len(self.config['all_dicts'])} 个无效路径")
+            # 从 groups 中删除（所有分组，不仅是当前分组）
+            if "groups" in self.config:
+                for group_name, paths in self.config["groups"].items():
+                    original_count = len(paths)
+                    self.config["groups"][group_name] = [
+                        p for p in paths
+                        if os.path.abspath(p) not in invalid_paths
+                    ]
+                    if len(self.config["groups"][group_name]) < original_count:
+                        modified = True
+                        print(f"[清理] 从 groups['{group_name}'] 删除 {original_count - len(self.config['groups'][group_name])} 个无效路径")
 
-        # 从 groups 中删除（所有分组，不仅是当前分组）
-        if "groups" in self.config:
-            for group_name, paths in self.config["groups"].items():
-                original_count = len(paths)
-                self.config["groups"][group_name] = [
-                    p for p in paths
+            # 从 excluded 中删除
+            if "excluded" in self.config:
+                original_count = len(self.config["excluded"])
+                self.config["excluded"] = [
+                    p for p in self.config["excluded"]
                     if os.path.abspath(p) not in invalid_paths
                 ]
-                if len(self.config["groups"][group_name]) < original_count:
+                if len(self.config["excluded"]) < original_count:
                     modified = True
-                    print(f"[清理] 从 groups['{group_name}'] 删除 {original_count - len(self.config['groups'][group_name])} 个无效路径")
-
-        # 从 excluded 中删除
-        if "excluded" in self.config:
-            original_count = len(self.config["excluded"])
-            self.config["excluded"] = [
-                p for p in self.config["excluded"]
-                if os.path.abspath(p) not in invalid_paths
-            ]
-            if len(self.config["excluded"]) < original_count:
-                modified = True
-                print(f"[清理] 从 excluded 删除 {original_count - len(self.config['excluded'])} 个无效路径")
+                    print(f"[清理] 从 excluded 删除 {original_count - len(self.config['excluded'])} 个无效路径")
 
         if modified:
             self._schedule_save_config()
@@ -137,10 +137,11 @@ class WindowApi:
     def _init_system(self):
         def task():
             self._load_config()
-            current_group = self.config.get("current_group", "")
+            with self._config_lock:
+                current_group = self.config.get("current_group", "")
+                group_paths = list(self.config.get("groups", {}).get(current_group, []))
             if current_group:
                 invalid_paths = set()
-                group_paths = self.config.get("groups", {}).get(current_group, [])
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
                     if not os.path.exists(abs_p):
@@ -168,13 +169,16 @@ class WindowApi:
     # ==================== 导入逻辑 ====================
     def _load_mdx_batch(self, file_paths):
         """统一的批量加载逻辑"""
-        existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
+        with self._config_lock:
+            existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
+            for p in file_paths:
+                abs_p = os.path.abspath(p)
+                if abs_p not in existing_ids:
+                    name = os.path.splitext(os.path.basename(p))[0]
+                    self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
+        # 加载词典在锁外执行
         for p in file_paths:
-            abs_p = os.path.abspath(p)
-            if abs_p not in existing_ids:
-                name = os.path.splitext(os.path.basename(p))[0]
-                self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
-            self.manager.load_mdx(abs_p)
+            self.manager.load_mdx(os.path.abspath(p))
         self._schedule_save_config()
         self._refresh_ui()
         self.window.evaluate_js(
@@ -205,17 +209,19 @@ class WindowApi:
 
     # ==================== 分组切换与查询 ====================
     def switch_group(self, group_name: str):
-        self.config["current_group"] = group_name if group_name else ""
+        with self._config_lock:
+            self.config["current_group"] = group_name if group_name else ""
         self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
         if group_name:
-            new_group_paths = {os.path.abspath(p) for p in self.config.get("groups", {}).get(group_name, [])}
+            with self._config_lock:
+                new_group_paths = {os.path.abspath(p) for p in self.config.get("groups", {}).get(group_name, [])}
+                group_paths = list(self.config.get("groups", {}).get(group_name, []))
 
             def switch_task():
                 self.manager.unload_all_except(new_group_paths)
                 invalid_paths = set()
-                group_paths = self.config.get("groups", {}).get(group_name, [])
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
                     if not os.path.exists(abs_p):
@@ -284,17 +290,47 @@ class WindowApi:
                 return
             item = self._current_results[index]
             key = item["key"]
-            sources = item["sources"]
+            sources = list(item["sources"])
 
         def task():
-            render_list = []
-            for i, source in enumerate(sources):
+            # 单词典直接加载，避免线程池开销
+            if len(sources) == 1:
+                source = sources[0]
                 idx = source.get("idx")
                 raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
                 if not raw_html:
-                    continue
-                safe_html = self._build_complete_html(raw_html, source["dict_id"], i)
-                render_list.append({"dict_name": source["dict_name"], "html": safe_html})
+                    return
+                safe_html = self._build_complete_html(raw_html, source["dict_id"], 0)
+                self.window.evaluate_js(
+                    f"setContent({json.dumps([{'dict_name': source['dict_name'], 'html': safe_html}], ensure_ascii=False)})"
+                )
+                return
+
+            # 多词典并行加载
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            render_list = [None] * len(sources)
+            workers = min(len(sources), 10)
+
+            def _load_one(i, source):
+                idx = source.get("idx")
+                raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
+                return i, raw_html
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_load_one, i, s) for i, s in enumerate(sources)]
+                for future in as_completed(futures):
+                    try:
+                        i, raw_html = future.result()
+                    except Exception as e:
+                        print(f"[显示] 加载词条内容失败: {e}")
+                        continue
+                    if not raw_html:
+                        continue
+                    safe_html = self._build_complete_html(raw_html, sources[i]["dict_id"], i)
+                    render_list[i] = {"dict_name": sources[i]["dict_name"], "html": safe_html}
+
+            # 过滤掉 None（加载失败的），保持原始顺序
+            render_list = [r for r in render_list if r is not None]
             if render_list:
                 self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
 
@@ -377,139 +413,146 @@ class WindowApi:
     # ==================== 分组管理界面 ====================
     def init_group_view(self):
         try:
-            all_dicts = self.config.get("all_dicts", [])
-            groups_data = []
-            for name, dict_list in self.config.get("groups", {}).items():
-                dicts_in_group = []
-                for d_id in dict_list:
-                    abs_id = os.path.abspath(d_id)
-                    match_d = next((d for d in all_dicts if d.get("id") == abs_id), None)
-                    dicts_in_group.append({
-                        "id": abs_id,
-                        "name": match_d.get("name", "未知词典") if match_d else "未知词典"
-                    })
-                groups_data.append({"name": name, "dicts": dicts_in_group})
-            current_group_name = self.config.get("current_group", "")
-            current_active = set(os.path.abspath(p) for p in self.config.get("groups", {}).get(current_group_name, []))
-            current_excluded = set(os.path.abspath(p) for p in self.config.get("excluded", []))
-            all_dicts_with_state = []
-            for d in all_dicts:
-                abs_id = os.path.abspath(d.get("id"))
-                if abs_id in current_active:
-                    status = "active"
-                elif abs_id in current_excluded:
-                    status = "excluded"
-                else:
-                    status = "none"
-                all_dicts_with_state.append({"id": abs_id, "name": d.get("name", ""), "status": status})
+            with self._config_lock:
+                all_dicts = list(self.config.get("all_dicts", []))
+                groups = self.config.get("groups", {})
+                current_group_name = self.config.get("current_group", "")
+                current_active = set(os.path.abspath(p) for p in groups.get(current_group_name, []))
+                current_excluded = set(os.path.abspath(p) for p in self.config.get("excluded", []))
+
+                groups_data = []
+                for name, dict_list in groups.items():
+                    dicts_in_group = []
+                    for d_id in dict_list:
+                        abs_id = os.path.abspath(d_id)
+                        match_d = next((d for d in all_dicts if d.get("id") == abs_id), None)
+                        dicts_in_group.append({
+                            "id": abs_id,
+                            "name": match_d.get("name", "未知词典") if match_d else "未知词典"
+                        })
+                    groups_data.append({"name": name, "dicts": dicts_in_group})
+
+                all_dicts_with_state = []
+                for d in all_dicts:
+                    abs_id = os.path.abspath(d.get("id"))
+                    if abs_id in current_active:
+                        status = "active"
+                    elif abs_id in current_excluded:
+                        status = "excluded"
+                    else:
+                        status = "none"
+                    all_dicts_with_state.append({"id": abs_id, "name": d.get("name", ""), "status": status})
+
             js_code = f"renderGroupView({json.dumps(all_dicts_with_state, ensure_ascii=False)}, {json.dumps(groups_data, ensure_ascii=False)}, {json.dumps(current_group_name, ensure_ascii=False)})"
             self.window.evaluate_js(js_code)
         except Exception as e:
             print(f"[DEBUG] init_group_view 错误: {e}")
 
     def add_group(self, name: str):
-        groups = self.config.setdefault("groups", {})
-        groups[name] = []
+        with self._config_lock:
+            groups = self.config.setdefault("groups", {})
+            groups[name] = []
         self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
 
     def delete_group(self):
-        current_group = self.config.get("current_group", "")
-        if not current_group:
-            return
-        self.config.get("groups", {}).pop(current_group, None)
-        self.config["current_group"] = ""
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            if not current_group:
+                return
+            self.config.get("groups", {}).pop(current_group, None)
+            self.config["current_group"] = ""
         self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
 
     def add_dict_to_group(self, dict_id):
-        current_group = self.config.get("current_group", "")
-        groups = self.config.setdefault("groups", {})
-        if not current_group or current_group not in groups:
-            if groups:
-                current_group = next(iter(groups.keys()), "")
-                self.config["current_group"] = current_group
-                self._schedule_save_config()
-                self._refresh_ui()
-            else:
-                self.window.evaluate_js("alert('请先新建一个分组！')")
-                return
-        dict_list = groups[current_group]
-        abs_id = os.path.abspath(dict_id)
-        if abs_id not in dict_list:
-            dict_list.append(abs_id)
-            if abs_id in self.config.get("excluded", []):
-                self.config["excluded"].remove(abs_id)
-            self._schedule_save_config()
-            self.manager.load_mdx(abs_id)
-            self.init_group_view()
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            groups = self.config.setdefault("groups", {})
+            if not current_group or current_group not in groups:
+                if groups:
+                    current_group = next(iter(groups.keys()), "")
+                    self.config["current_group"] = current_group
+                else:
+                    self.window.evaluate_js("alert('请先新建一个分组！')")
+                    return
+            dict_list = groups[current_group]
+            abs_id = os.path.abspath(dict_id)
+            if abs_id not in dict_list:
+                dict_list.append(abs_id)
+                if abs_id in self.config.get("excluded", []):
+                    self.config["excluded"].remove(abs_id)
+        # 锁外加载
+        self.manager.load_mdx(abs_id)
+        self._schedule_save_config()
+        self.init_group_view()
 
     def remove_dict_from_group(self, dict_id):
-        current_group = self.config.get("current_group", "")
-        if not current_group:
-            return
-        dict_list = self.config.get("groups", {}).get(current_group, [])
-        abs_id = os.path.abspath(dict_id)
-        if abs_id in dict_list:
-            dict_list.remove(abs_id)
-            self._schedule_save_config()
-            self.init_group_view()
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            if not current_group:
+                return
+            dict_list = self.config.get("groups", {}).get(current_group, [])
+            abs_id = os.path.abspath(dict_id)
+            if abs_id in dict_list:
+                dict_list.remove(abs_id)
+        self._schedule_save_config()
+        self.init_group_view()
 
     def exclude_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
-
-        # 从所有分组中移除该词典（不仅限当前分组）
-        for group_name, dict_list in self.config.get("groups", {}).items():
-            if abs_id in dict_list:
-                dict_list.remove(abs_id)
-
-        # 加入排除列表
-        if abs_id not in self.config.get("excluded", []):
-            self.config.setdefault("excluded", []).append(abs_id)
-
+        with self._config_lock:
+            # 从所有分组中移除该词典
+            for group_name, dict_list in self.config.get("groups", {}).items():
+                if abs_id in dict_list:
+                    dict_list.remove(abs_id)
+            # 加入排除列表
+            if abs_id not in self.config.get("excluded", []):
+                self.config.setdefault("excluded", []).append(abs_id)
         self._schedule_save_config()
-
-        # 从内存卸载
+        # 锁外卸载
         try:
             self.manager.unload_mdx(abs_id)
         except Exception as e:
             print(f"卸载词典时发生异常(已忽略): {e}")
-
         self.init_group_view()
-
 
     def reload_excluded_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
-        if abs_id in self.config.get("excluded", []):
-            self.config["excluded"].remove(abs_id)
-            self._schedule_save_config()
-            self.manager.load_mdx(abs_id)
-            self.init_group_view()
+        with self._config_lock:
+            if abs_id in self.config.get("excluded", []):
+                self.config["excluded"].remove(abs_id)
+        self._schedule_save_config()
+        # 锁外加载
+        self.manager.load_mdx(abs_id)
+        self.init_group_view()
 
     def move_dict(self, dict_id: str, action: str):
-        current_group = self.config.get("current_group", "")
-        if not current_group:
-            return
-        ids = self.config.get("groups", {}).get(current_group, [])
-        abs_id = os.path.abspath(dict_id)
-        if abs_id not in ids:
-            return
-        index = ids.index(abs_id)
-        if action == 'up' and index > 0:
-            ids[index], ids[index - 1] = ids[index - 1], ids[index]
-        elif action == 'down' and index < len(ids) - 1:
-            ids[index], ids[index + 1] = ids[index + 1], ids[index]
-        elif action == 'top':
-            ids.pop(index); ids.insert(0, abs_id)
-        elif action == 'bottom':
-            ids.pop(index); ids.append(abs_id)
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            if not current_group:
+                return
+            ids = self.config.get("groups", {}).get(current_group, [])
+            abs_id = os.path.abspath(dict_id)
+            if abs_id not in ids:
+                return
+            index = ids.index(abs_id)
+            if action == 'up' and index > 0:
+                ids[index], ids[index - 1] = ids[index - 1], ids[index]
+            elif action == 'down' and index < len(ids) - 1:
+                ids[index], ids[index + 1] = ids[index + 1], ids[index]
+            elif action == 'top':
+                ids.pop(index); ids.insert(0, abs_id)
+            elif action == 'bottom':
+                ids.pop(index); ids.append(abs_id)
         self._schedule_save_config()
         self.init_group_view()
 
     def get_dict_info(self, dict_id):
-        all_dicts = self.config.get("all_dicts", [])
+        with self._config_lock:
+            all_dicts = list(self.config.get("all_dicts", []))
         target = next((d for d in all_dicts if d.get("id") == os.path.abspath(dict_id)), None)
         if target:
             title = target.get("name", "未知词典")
