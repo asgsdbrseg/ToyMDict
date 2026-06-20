@@ -1,13 +1,12 @@
 # ToyMDict
 一个MDict玩具，用于查询mdx，mdd。
 
-代码：智谱清言
+代码：智谱清言，TRAE
 
 参考：
 1. https://github.com/raymanzhang/mdict
 2. https://bitbucket.org/xwang/mdict-analysis/src
 3. https://github.com/KnIfER/PlainDictionaryAPP
-4. https://github.com/fengdh/mdict-js
 
 特点：
 1. 支持异体字关联搜索（可自行修改`variants.json`，重启程序后生效）
