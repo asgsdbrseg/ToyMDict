@@ -13,10 +13,22 @@ def safe_url_encode(path: str) -> str:
 def get_mime_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
     mime_map = {
+        # 文本与脚本
         '.css': 'text/css', '.js': 'application/javascript',
+        '.json': 'application/json', '.xml': 'application/xml',
+        '.html': 'text/html', '.htm': 'text/html', '.txt': 'text/plain',
+        # 图片
         '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-        '.gif': 'image/gif', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-        '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.mp4': 'video/mp4',
+        '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp',
+        '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+        '.tiff': 'image/tiff', '.tif': 'image/tiff',
+        # 字体
+        '.woff': 'font/woff', '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf', '.otf': 'font/otf', '.eot': 'application/vnd.ms-fontobject',
+        # 音视频
+        '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+        '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
+        '.mp4': 'video/mp4', '.webm': 'video/webm', '.avi': 'video/x-msvideo',
     }
     return mime_map.get(ext, 'application/octet-stream')
 
