@@ -579,7 +579,7 @@ class CachedMDX:
                         "comp": comp_size,
                         "decomp": decomp_size
                     })
-            f.seek(comp_size, 1)
+                    f.seek(comp_size, 1)
 
     def _build_index(self):
         with self._file_lock:
