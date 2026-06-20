@@ -167,7 +167,6 @@ class MdxWrapper:
     def search(self, keyword: str, use_variants: bool) -> list:
         if not self.loaded or not keyword:
             return []
-        self._entry_cache.clear()
         results = []
         seen_idx = set()  # 修改：使用 idx 去重，避免异体字搜索重复返回同一词条
 
@@ -184,7 +183,7 @@ class MdxWrapper:
                         results.append((key, idx))
         return results
 
-    def get_content(self, key: str, idx: int = None) -> str:
+    def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:
         if idx is not None:
             cache_key = (key, idx)
             if cache_key in self._entry_cache:
@@ -200,9 +199,12 @@ class MdxWrapper:
 
             c_stripped = c.strip() if isinstance(c, str) else c.decode('utf-8', errors='ignore').strip()
             if c_stripped.startswith("@@@LINK="):
+                # 递归深度限制，防止循环引用导致栈溢出
+                if _link_depth >= 10:
+                    return f'<div style="padding:8px;color:#888;">⚠ 参见层级过深：<b>{key}</b></div>'
                 target_word = c_stripped.replace("@@@LINK=", "").strip()
                 if target_word:
-                    target_html = self.get_content(target_word)
+                    target_html = self.get_content(target_word, _link_depth=_link_depth + 1)
                     return target_html if target_html else f'<div style="padding:8px;color:#888;">🔗 参见词条：<b>{target_word}</b></div>'
 
             # 添加到缓存，超过限制时删除最旧的

@@ -2,10 +2,12 @@
 from core.mdx_wrapper import MdxWrapper
 import os
 import json
+import threading
 
 class DictionaryManager:
     def __init__(self):
         self.loaded_dicts: dict[str, MdxWrapper] = {}
+        self._lock = threading.RLock()
         self._variant_handler = None
         self._init_variant_handler()
 
@@ -23,9 +25,7 @@ class DictionaryManager:
             with open(json_path, 'r', encoding='utf-8') as f:
                 variants = json.load(f)
                 
-            variant_dict = {}
-            for key, val in variants.items():
-                variant_dict[key] = val
+            variant_dict = dict(variants)
                 
             print(f"[异体字] 映射表: {json_path}")
             self._variant_handler = VariantHandler(variant_dict)
@@ -39,42 +39,51 @@ class DictionaryManager:
 
     def load_mdx(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
-        if abs_path in self.loaded_dicts or not os.path.exists(abs_path):
-            return abs_path in self.loaded_dicts
-            
-        wrapper = MdxWrapper(abs_path)
-        if wrapper.load(variant_handler=self._variant_handler):
-            self.loaded_dicts[abs_path] = wrapper
-            return True
-        return False
+        with self._lock:
+            if abs_path in self.loaded_dicts:
+                return True
+            if not os.path.exists(abs_path):
+                return False
+
+            wrapper = MdxWrapper(abs_path)
+            if wrapper.load(variant_handler=self._variant_handler):
+                self.loaded_dicts[abs_path] = wrapper
+                return True
+            return False
 
     def unload_mdx(self, path: str):
         abs_path = os.path.abspath(path)
-        if abs_path in self.loaded_dicts:
-            self.loaded_dicts[abs_path].close()
-            del self.loaded_dicts[abs_path]
+        with self._lock:
+            wrapper = self.loaded_dicts.pop(abs_path, None)
+        if wrapper:
+            wrapper.close()
 
     def unload_all_except(self, keep_paths: set):
-        to_unload = [p for p in self.loaded_dicts if p not in keep_paths]
-        for p in to_unload:
-            self.unload_mdx(p)
+        with self._lock:
+            to_unload = [p for p in self.loaded_dicts if p not in keep_paths]
+            wrappers = [self.loaded_dicts.pop(p) for p in to_unload]
+        for wrapper in wrappers:
+            wrapper.close()
 
     def search(self, keyword: str, use_variants: bool) -> list:
-        if not self.loaded_dicts or not keyword:
+        with self._lock:
+            wrappers = list(self.loaded_dicts.items())
+        if not wrappers or not keyword:
             return []
-            
+
         merged_results = {}
-        for path, wrapper in self.loaded_dicts.items():
+        seen_pairs: set[tuple[str, int]] = set()
+        for path, wrapper in wrappers:
             for key, idx in wrapper.search(keyword, use_variants):
                 if key not in merged_results:
                     merged_results[key] = {"key": key, "sources": []}
-                    
-                # 修改：以 dict_id + idx 作为去重凭证，避免同名词条被吞并
-                if not any(s["dict_id"] == path and s["idx"] == idx for s in merged_results[key]["sources"]):
+                pair = (path, idx)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
                     merged_results[key]["sources"].append({
                         "dict_id": path,
                         "dict_name": wrapper.name,
-                        "idx": idx  # 新增：保留词条索引
+                        "idx": idx
                     })
 
         results = list(merged_results.values())
@@ -82,25 +91,24 @@ class DictionaryManager:
         return results
 
     def get_content(self, dict_id: str, key: str, idx: int = None) -> tuple:
-        # 修改：增加 idx 传递
         abs_path = os.path.abspath(dict_id)
-        wrapper = self.loaded_dicts.get(abs_path)
+        with self._lock:
+            wrapper = self.loaded_dicts.get(abs_path)
         if not wrapper:
             return "", ""
         return wrapper.get_content(key, idx), wrapper.name
 
     def get_resource(self, dict_id: str, path: str) -> bytes:
         abs_path = os.path.abspath(dict_id)
-        wrapper = self.loaded_dicts.get(abs_path)
+        with self._lock:
+            wrapper = self.loaded_dicts.get(abs_path)
         if not wrapper:
             return None
 
-        # 修改：统一调用 wrapper.get_resource，内部会自动遍历所有 MDD
         data = wrapper.get_resource(path)
         if data:
             return data
 
-        # 本地文件兜底（MDX 同目录）
         if wrapper.folder_path:
             try:
                 from utils.path_helper import normalize_resource_path
@@ -108,7 +116,7 @@ class DictionaryManager:
                 if os.path.isfile(file_path):
                     with open(file_path, 'rb') as f:
                         return f.read()
-            except Exception as e:
+            except Exception:
                 pass
 
         return None
