@@ -39,17 +39,26 @@ class DictionaryManager:
 
     def load_mdx(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
+        # 快速检查：已加载则直接返回（短锁）
         with self._lock:
             if abs_path in self.loaded_dicts:
                 return True
-            if not os.path.exists(abs_path):
-                return False
-
-            wrapper = MdxWrapper(abs_path)
-            if wrapper.load(variant_handler=self._variant_handler):
-                self.loaded_dicts[abs_path] = wrapper
-                return True
+        if not os.path.exists(abs_path):
             return False
+
+        # 耗时加载过程在锁外执行，不阻塞 search / get_content / get_resource
+        wrapper = MdxWrapper(abs_path)
+        if not wrapper.load(variant_handler=self._variant_handler):
+            return False
+
+        # 加载完成后，短锁写入字典
+        with self._lock:
+            if abs_path in self.loaded_dicts:
+                # 并发重复加载，关闭多余的 wrapper
+                wrapper.close()
+                return True
+            self.loaded_dicts[abs_path] = wrapper
+        return True
 
     def unload_mdx(self, path: str):
         abs_path = os.path.abspath(path)
