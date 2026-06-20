@@ -56,7 +56,7 @@ class VariantHandler:
         for combo in itertools.product(*chars_variants):
             yield ''.join(combo)
     
-    def expand_keyword(self, keyword: str, max_combinations: int = 100) -> List[str]:
+    def expand_keyword(self, keyword: str, max_combinations: int = 1024) -> List[str]:
         """
         展开关键词为异体字组合列表（限制数量）
         
