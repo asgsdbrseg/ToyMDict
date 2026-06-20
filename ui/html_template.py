@@ -162,11 +162,14 @@ HTML_TEMPLATE = """
             const use_variants = document.getElementById('variantCheck').checked;
             if(keyword) pywebview.api.search(keyword, use_variants);
         }
-        function updateUI(data) { 
-            const optHtml = data.groups.map(g => `<option value="${g.name}"${g.name === data.current ? 'selected' : ''}>${g.name}</option>`).join(''); 
-            document.getElementById('groupSelect').innerHTML = optHtml; 
-            document.getElementById('groupSelectGroupView').innerHTML = optHtml; 
-        } 
+        function updateUI(data) {
+            const optHtml = data.groups.map(g => {
+                const name = escapeHtml(g.name);
+                return `<option value="${name}"${g.name === data.current ? 'selected' : ''}>${name}</option>`;
+            }).join('');
+            document.getElementById('groupSelect').innerHTML = optHtml;
+            document.getElementById('groupSelectGroupView').innerHTML = optHtml;
+        }
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -253,12 +256,15 @@ HTML_TEMPLATE = """
         function showMainView() { 
             document.getElementById('groupView').style.display = 'none'; 
         } 
-        function renderGroupView(allDicts, groups, currentGroup) { 
-            // === 修复：确保分组下拉框正确渲染 === 
-            const optHtml = groups.map(g => `<option value="${g.name}"${g.name === currentGroup ? 'selected' : ''}>${g.name}</option>`).join(''); 
-            document.getElementById('groupSelect').innerHTML = optHtml; 
-            document.getElementById('groupSelectGroupView').innerHTML = optHtml; 
-            const currentGroupData = groups.find(g => g.name === currentGroup); 
+        function renderGroupView(allDicts, groups, currentGroup) {
+            // === 修复：确保分组下拉框正确渲染，并对名称转义 ===
+            const optHtml = groups.map(g => {
+                const name = escapeHtml(g.name);
+                return `<option value="${name}"${g.name === currentGroup ? 'selected' : ''}>${name}</option>`;
+            }).join('');
+            document.getElementById('groupSelect').innerHTML = optHtml;
+            document.getElementById('groupSelectGroupView').innerHTML = optHtml;
+            const currentGroupData = groups.find(g => g.name === currentGroup);
             
             // ===== 渲染左侧：全部词典 ===== 
             const allList = document.getElementById('allDictsList'); 

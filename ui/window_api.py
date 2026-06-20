@@ -7,6 +7,7 @@ import html as html_module
 from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.resource_resolver import MdxResourceResolver
 import time
+from services import storage
 
 class WindowApi:
     def __init__(self, window, manager, resource_server):
@@ -15,18 +16,25 @@ class WindowApi:
         self.server = resource_server
         self._current_results = []
         self._results_lock = threading.Lock()
+        self._config_lock = threading.RLock()  # 新增：保护 self.config
         self.config = {}
         self._init_system()
         self._save_timer = None
-        self._save_delay = 0.5  # 500ms 防抖
+        self._save_delay = 0.5
 
-        # ===== 新增：加载自定义 CSS =====
         self._custom_css = ""
         self._load_custom_css()
 
+    def _get_config(self, key, default=None):
+        with self._config_lock:
+            return self.config.get(key, default)
+
+    def _set_config(self, key, value):
+        with self._config_lock:
+            self.config[key] = value
+
     # ==================== 配置读写 ====================
     def _load_config(self):
-        from services import storage
         try:
             self.config = storage.load_config()
         except Exception as e:
@@ -46,11 +54,11 @@ class WindowApi:
         self._save_timer.start()
 
     def _save_config_now(self):
-        """实际保存配置"""
-        from services import storage
-        if not isinstance(self.config.get("excluded"), list):
-            self.config["excluded"] = []
-        storage.save_config(self.config)
+        with self._config_lock:
+            if not isinstance(self.config.get("excluded"), list):
+                self.config["excluded"] = []
+            config_snapshot = json.loads(json.dumps(self.config))  # 深拷贝避免迭代时被改
+        storage.save_config(config_snapshot)
 
     # ==================== 自定义 CSS ====================
 
@@ -150,8 +158,9 @@ class WindowApi:
 
     def _refresh_ui(self):
         try:
-            data = {"groups": [{"name": g} for g in self.config.get("groups", {}).keys()],
-                    "current": self.config.get("current_group", "")}
+            with self._config_lock:
+                data = {"groups": [{"name": g} for g in self.config.get("groups", {}).keys()],
+                        "current": self.config.get("current_group", "")}
             self.window.evaluate_js(f"updateUI({json.dumps(data, ensure_ascii=False)})")
         except Exception:
             pass
@@ -239,11 +248,13 @@ class WindowApi:
             print(f"[DEBUG] 自动搜索失败: {e}")
 
     def search(self, keyword: str, use_variants: bool):
-        current_group = self.config.get("current_group", "")
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            group_paths = self.config.get("groups", {}).get(current_group, [])
         if not current_group:
             self.window.evaluate_js('updateResults([])')
             return
-        allowed_ids = set(os.path.abspath(p) for p in self.config.get("groups", {}).get(current_group, []))
+        allowed_ids = set(os.path.abspath(p) for p in group_paths)
         if not allowed_ids:
             self.window.evaluate_js('updateResults([])')
             return
@@ -256,12 +267,14 @@ class WindowApi:
                                  if os.path.abspath(s["dict_id"]) in allowed_ids]
                 if valid_sources:
                     filtered_results.append({"key": r["key"], "sources": valid_sources})
-            self._current_results = filtered_results
-            self.window.evaluate_js(f"updateResults({json.dumps(filtered_results, ensure_ascii=False)})")
-            if filtered_results and filtered_results[0]["key"] == keyword:
-                self.show_entry(0)
+
             with self._results_lock:
                 self._current_results = filtered_results
+                first_match = (filtered_results and filtered_results[0]["key"] == keyword)
+
+            self.window.evaluate_js(f"updateResults({json.dumps(filtered_results, ensure_ascii=False)})")
+            if first_match:
+                self.show_entry(0)
 
         threading.Thread(target=task, daemon=True).start()
 
