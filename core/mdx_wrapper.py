@@ -168,19 +168,43 @@ class MdxWrapper:
         if not self.loaded or not keyword:
             return []
         results = []
-        seen_idx = set()  # 修改：使用 idx 去重，避免异体字搜索重复返回同一词条
+        seen_idx = set()
 
-        for key, idx in self.mdx.search_prefix(keyword, max_results=50):
-            if idx not in seen_idx:
-                seen_idx.add(idx)
-                results.append((key, idx))
+        # 无异体字或不需要展开：普通前缀搜索
+        if not (use_variants and self.variant_handler and self.variant_handler.should_expand(keyword)):
+            for key, idx in self.mdx.search_prefix(keyword, max_results=50):
+                if idx not in seen_idx:
+                    seen_idx.add(idx)
+                    results.append((key, idx))
+            return results
 
-        if use_variants and self.variant_handler and self.variant_handler.should_expand(keyword):
-            for v_kw in self.variant_handler.expand_keyword(keyword):
-                for key, idx in self.mdx.search_prefix(v_kw, max_results=50):
+        # 需要异体字展开：自适应选择策略
+        if self.variant_handler.should_use_regex(keyword):
+            # 组合数多：用正则一次扫描代替多次 search_prefix
+            regex_info = self.variant_handler.build_regex_pattern(keyword)
+            if regex_info:
+                pattern, first_chars, min_first, max_first = regex_info
+                # 关键修复：全部用关键字参数，避免位置参数错位
+                for key, idx in self.mdx.search_regex(
+                    pattern,
+                    first_chars=first_chars,
+                    min_first=min_first,
+                    max_first=max_first,
+                    max_results=50,
+                ):
                     if idx not in seen_idx:
                         seen_idx.add(idx)
                         results.append((key, idx))
+                return results
+
+        # 组合数少：多次 search_prefix（每次都有 block 级 skip 优化）
+        for v_kw in self.variant_handler.generate_combinations(keyword):
+            for key, idx in self.mdx.search_prefix(v_kw, max_results=50):
+                if idx not in seen_idx:
+                    seen_idx.add(idx)
+                    results.append((key, idx))
+            if len(results) >= 50:
+                break
         return results
 
     def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:
