@@ -168,7 +168,7 @@ class MdxWrapper:
         seen_idx = set()
 
         # 无异体字或不需要展开：普通前缀搜索
-        if not (use_variants and self.variant_handler and self.variant_handler.should_expand(keyword)):
+        if not (use_variants and self.variant_handler):
             for key, idx in self.mdx.search_prefix(keyword, max_results=50):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
