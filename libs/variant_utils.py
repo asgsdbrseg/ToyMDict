@@ -57,21 +57,6 @@ class VariantHandler:
         for combo in itertools.product(*chars_variants):
             yield ''.join(combo)
 
-    def should_expand(self, keyword: str) -> bool:
-        """
-        判断是否需要展开异体字搜索
-
-        Args:
-            keyword: 关键词
-
-        Returns:
-            是否需要展开
-        """
-        # 检查是否有异体字
-        for ch in keyword:
-            if ch in self.variant_map and len(self.variant_map[ch]) > 1:
-                return True
-        return False
 
     def build_full_regex(self, keyword: str, exact: bool = False):
         """构建完整正则匹配模式（从头匹配）
