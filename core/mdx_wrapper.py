@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 import os
+import re
 from typing import List, Dict, Optional
 from libs.readmdict import CachedMDX, CachedMDD
-from collections import OrderedDict
 
 class MdxWrapper:
-    MAX_ENTRY_CACHE = 200
-
     def __init__(self, mdx_path: str):
         self.mdx_path = mdx_path
         self.folder_path = os.path.dirname(mdx_path)
@@ -18,7 +16,6 @@ class MdxWrapper:
         self.mdds: List[CachedMDD] = []  # 修改：支持多个 MDD
         self.loaded = False
         self.variant_handler = None
-        self._entry_cache: OrderedDict[tuple, str] = OrderedDict()
         self._cached_entry_count = None  # 缓存词条数
 
     def load(self, variant_handler=None) -> bool:
@@ -171,49 +168,54 @@ class MdxWrapper:
         seen_idx = set()
 
         # 无异体字或不需要展开：普通前缀搜索
-        if not (use_variants and self.variant_handler and self.variant_handler.should_expand(keyword)):
+        if not (use_variants and self.variant_handler):
             for key, idx in self.mdx.search_prefix(keyword, max_results=50):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
                     results.append((key, idx))
             return results
 
-        # 需要异体字展开：自适应选择策略
-        if self.variant_handler.should_use_regex(keyword):
-            # 组合数多：用正则一次扫描代替多次 search_prefix
-            regex_info = self.variant_handler.build_regex_pattern(keyword)
-            if regex_info:
-                pattern, first_chars, min_first, max_first = regex_info
-                # 关键修复：全部用关键字参数，避免位置参数错位
-                for key, idx in self.mdx.search_regex(
-                    pattern,
-                    first_chars=first_chars,
-                    min_first=min_first,
-                    max_first=max_first,
-                    max_results=50,
-                ):
+        # ===== 异体字搜索：两步方案 =====
+        # 单字搜索词：直接展开所有异体字组合做前缀搜索
+        if len(keyword) == 1:
+            for v_kw in self.variant_handler.generate_combinations(keyword):
+                for key, idx in self.mdx.search_prefix(v_kw, max_results=50):
                     if idx not in seen_idx:
                         seen_idx.add(idx)
                         results.append((key, idx))
-                return results
+                if len(results) >= 50:
+                    break
+            return results
 
-        # 组合数少：多次 search_prefix（每次都有 block 级 skip 优化）
-        for v_kw in self.variant_handler.generate_combinations(keyword):
-            for key, idx in self.mdx.search_prefix(v_kw, max_results=50):
+        # 多字搜索词（len > 1）：两步方案
+        # 第一步：用第一个字的异体字做前缀搜索（高效，有 block 级 skip + 长度预过滤）
+        # 第二步：在第一步的结果集上用正则过滤剩余字符的异体字组合
+        regex = self.variant_handler.build_full_regex(keyword, exact=False)
+        if regex is None:
+            # 构建失败，回退到普通搜索
+            for key, idx in self.mdx.search_prefix(keyword, max_results=50):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
                     results.append((key, idx))
-            if len(results) >= 50:
-                break
+            return results
+
+        first_char_variants = sorted(self.variant_handler.get_variants(keyword[0]))
+        min_len = len(keyword)  # 长度预过滤：短于搜索词长度的 key 直接跳过
+
+        for first_variant in first_char_variants:
+            for key, idx in self.mdx.search_prefix(first_variant, max_results=5000, min_len=min_len):
+                if idx in seen_idx:
+                    continue
+                seen_idx.add(idx)
+                # 第二步：内存中用正则精确匹配
+                if regex.match(key):
+                    results.append((key, idx))
+                    if len(results) >= 50:
+                        return results
         return results
 
     def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:
         if idx is not None:
-            cache_key = (key, idx)
-            if cache_key in self._entry_cache:
-                self._entry_cache.move_to_end(cache_key)  # 标记最近使用
-                return self._entry_cache[cache_key]
-
             try:
                 c = self.mdx.get_by_index(idx)
             except Exception as e:
@@ -230,16 +232,9 @@ class MdxWrapper:
                 if target_word:
                     target_html = self.get_content(target_word, _link_depth=_link_depth + 1)
                     return target_html if target_html else f'<div style="padding:8px;color:#888;">🔗 参见词条：<b>{target_word}</b></div>'
-
-            # 添加到缓存，超过限制时删除最旧的
-            self._entry_cache[cache_key] = c_stripped
-            if len(self._entry_cache) > self.MAX_ENTRY_CACHE:
-                self._entry_cache.popitem(last=False)
             return c_stripped
 
         # 兼容旧调用：如果没有传 idx，退回只用 key 查询的逻辑
-        if key in self._entry_cache:
-            return self._entry_cache[key]
         search_res = self.mdx.search_prefix(key, max_results=1)
         if not search_res:
             return ""

@@ -678,7 +678,14 @@ class CachedMDX:
                 self._record_cache.popitem(last=False)
             return block_data
 
-    def search_prefix(self, prefix, max_results=100):
+    def search_prefix(self, prefix, max_results=100, min_len=0):
+        """前缀搜索
+
+        Args:
+            prefix: 搜索前缀
+            max_results: 最大结果数
+            min_len: key 最小长度过滤，短于该长度的 key 直接跳过（用于两步异体字搜索的长度预过滤）
+        """
         results = []
         prefix_lower = prefix.lower()
         for idx, meta in enumerate(self._key_blocks_meta):
@@ -692,6 +699,9 @@ class CachedMDX:
             stop_outer = False
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
                 key_str = key_bytes.decode('utf-8', errors='ignore')
+                # 长度预过滤：短于 min_len 的直接跳过
+                if min_len > 0 and len(key_str) < min_len:
+                    continue
                 key_lower = key_str.lower()
                 if key_lower.startswith(prefix_lower):
                     results.append((key_str, base_abs_idx + local_idx))
@@ -704,44 +714,6 @@ class CachedMDX:
                     break
             if stop_outer:
                 break
-        return results
-
-    def search_regex(self, pattern, first_chars=None, min_first=None, max_first=None, max_results=100):
-        """正则前缀搜索，带精确 block 级 skip 优化
-
-        用于异体字搜索，将 N 次独立 search_prefix 合并为 1 次正则扫描。
-
-        Args:
-            pattern: 正则模式字符串（如 '^[莺𮹘...][歌𬤐...]...'）
-            first_chars: 首字符异体字集合（保留参数，当前用 min_first/max_first 优化）
-            min_first: 首字符异体字的最小值，用于 block 级 skip
-            max_first: 首字符异体字的最大值，用于 block 级 skip
-            max_results: 最大结果数
-        """
-        import re
-        regex = re.compile(pattern)
-        results = []
-
-        for idx, meta in enumerate(self._key_blocks_meta):
-            # ===== 精确 block 级 skip =====
-            if min_first is not None:
-                block_first = meta["first"]
-                block_last = meta["last"]
-                # block 最后一个 key 的首字符 < 最小异体字 → 跳过
-                if block_last and block_last[0] < min_first:
-                    continue
-                # block 第一个 key 的首字符 > 最大异体字 → 停止
-                if block_first and block_first[0] > max_first:
-                    break
-
-            keys_block = self._get_key_block(idx)
-            base_abs_idx = self._key_count_prefix[idx]
-            for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                key_str = key_bytes.decode('utf-8', errors='ignore')
-                if regex.match(key_str):
-                    results.append((key_str, base_abs_idx + local_idx))
-                    if len(results) >= max_results:
-                        return results
         return results
 
     def get_by_index(self, abs_idx):
