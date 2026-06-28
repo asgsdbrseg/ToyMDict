@@ -60,44 +60,32 @@ class VariantHandler:
     def should_expand(self, keyword: str) -> bool:
         """
         判断是否需要展开异体字搜索
-        
+
         Args:
             keyword: 关键词
-            
+
         Returns:
             是否需要展开
         """
-        # 如果关键词长度超过10，不展开（避免组合爆炸）
-        if len(keyword) > 10:
-            return False
-        
         # 检查是否有异体字
         for ch in keyword:
             if ch in self.variant_map and len(self.variant_map[ch]) > 1:
                 return True
         return False
 
-    def should_use_regex(self, keyword: str, max_count: str = 100) -> bool:
-        """判断是否应该用正则搜索（组合数多时才用）
+    def build_full_regex(self, keyword: str, exact: bool = False):
+        """构建完整正则匹配模式（从头匹配）
 
-        经验阈值：
-        - 组合数 ≤ 100：多次 search_prefix 更快（正则开销 > 合并扫描收益）
-        - 组合数 > 100：正则搜索更快（合并扫描收益 > 正则开销）
+        例如 "莺歌燕舞" → '^[莺𮹘𬸕鶯𦾉鸎][歌𬤐謌][燕𱊴𮹜𬸧𪈏䴏鷰][舞儛]'
+
+        Args:
+            keyword: 关键词
+            exact: True 为精确匹配（加 $ 结尾锚定），False 为前缀匹配（默认，用于搜索结果过滤）
+
+        Returns:
+            编译好的正则对象，或 None（无可展开字符时）
         """
-        if not self.should_expand(keyword):
-            return False
-        count = 1
-        for ch in keyword:
-            count *= len(self.get_variants(ch))
-            if count > max_count:
-                return True
-        return False
-
-    def build_regex_pattern(self, keyword: str):
-        """构建正则模式，返回 (pattern, first_chars, min_prefix, max_prefix)
-
-        min_prefix/max_prefix: 首字符异体字的最小/最大值，用于 block 级 skip
-        """
+        import re
         if not keyword:
             return None
         parts = []
@@ -112,11 +100,7 @@ class VariantHandler:
                 parts.append(re.escape(ch))
         if not has_variant:
             return None
-
         pattern = '^' + ''.join(parts)
-        first_variants = sorted(self.get_variants(keyword[0]))
-        first_chars = set(first_variants)
-        # 用完整首字符的 min/max 做 block 级 skip（比单字符更精确）
-        min_first = first_variants[0]
-        max_first = first_variants[-1]
-        return pattern, first_chars, min_first, max_first
+        if exact:
+            pattern += '$'
+        return re.compile(pattern)
