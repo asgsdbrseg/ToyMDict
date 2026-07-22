@@ -403,8 +403,8 @@ class WindowApi:
         </script>
         '''
 
-        return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">{custom_css_tag}{head_content}</head>
-        <body style="margin: 0; padding: 0; height: auto; overflow: hidden; max-width: 100vw; font-size: 24px;">
+        return f'''<!DOCTYPE html><html style="overflow: hidden; font-size: 24px;"><head><meta charset="UTF-8">{custom_css_tag}{head_content}</head>
+        <body style="margin: 0; padding: 0; height: auto;">
         {body_html}
         {resize_script}
         {entry_script}
