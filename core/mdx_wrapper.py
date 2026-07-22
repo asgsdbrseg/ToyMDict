@@ -188,7 +188,7 @@ class MdxWrapper:
             return results
 
         # 多字搜索词（len > 1）：两步方案
-        # 第一步：用第一个字的异体字做前缀搜索（高效，有 block 级 skip + 长度预过滤）
+        # 第一步：用第一个字的异体字做前缀搜索（字节级匹配，block 级 skip）
         # 第二步：在第一步的结果集上用正则过滤剩余字符的异体字组合
         regex = self.variant_handler.build_full_regex(keyword, exact=False)
         if regex is None:
@@ -200,14 +200,13 @@ class MdxWrapper:
             return results
 
         first_char_variants = sorted(self.variant_handler.get_variants(keyword[0]))
-        min_len = len(keyword)  # 长度预过滤：短于搜索词长度的 key 直接跳过
 
         for first_variant in first_char_variants:
-            for key, idx in self.mdx.search_prefix(first_variant, max_results=5000, min_len=min_len):
+            for key, idx in self.mdx.search_prefix(first_variant, max_results=5000):
                 if idx in seen_idx:
                     continue
                 seen_idx.add(idx)
-                # 第二步：内存中用正则精确匹配
+                # 第二步：内存中用正则精确匹配（正则自然过滤掉长度不足的 key）
                 if regex.match(key):
                     results.append((key, idx))
                     if len(results) >= 50:
