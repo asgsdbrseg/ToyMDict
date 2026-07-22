@@ -678,16 +678,16 @@ class CachedMDX:
                 self._record_cache.popitem(last=False)
             return block_data
 
-    def search_prefix(self, prefix, max_results=100, min_len=0):
-        """前缀搜索
+    def search_prefix(self, prefix, max_results=100):
+        """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）
 
         Args:
             prefix: 搜索前缀
             max_results: 最大结果数
-            min_len: key 最小长度过滤，短于该长度的 key 直接跳过（用于两步异体字搜索的长度预过滤）
         """
         results = []
         prefix_lower = prefix.lower()
+        prefix_bytes = prefix_lower.encode('utf-8')
         for idx, meta in enumerate(self._key_blocks_meta):
             if meta["last"].lower() < prefix_lower:
                 continue
@@ -698,18 +698,16 @@ class CachedMDX:
             base_abs_idx = self._key_count_prefix[idx]  # O(1) 替代 O(n) 的 sum
             stop_outer = False
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                key_str = key_bytes.decode('utf-8', errors='ignore')
-                # 长度预过滤：短于 min_len 的直接跳过
-                if min_len > 0 and len(key_str) < min_len:
-                    continue
-                key_lower = key_str.lower()
-                if key_lower.startswith(prefix_lower):
+                # 字节级匹配：bytes.lower() 只处理 ASCII 大小写，比 decode 快
+                key_lower_bytes = key_bytes.lower()
+                if key_lower_bytes.startswith(prefix_bytes):
+                    # 只有命中才 decode
+                    key_str = key_bytes.decode('utf-8', errors='ignore')
                     results.append((key_str, base_abs_idx + local_idx))
                     if len(results) >= max_results:
                         return results
-                elif key_lower > prefix_lower:
+                elif key_lower_bytes > prefix_bytes:
                     # key 已排序，后续 key 都更大，不可能再匹配
-                    # 需同时退出内层和外层循环
                     stop_outer = True
                     break
             if stop_outer:
