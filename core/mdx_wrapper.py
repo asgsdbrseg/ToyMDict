@@ -169,7 +169,7 @@ class MdxWrapper:
 
         # 无异体字或不需要展开：普通前缀搜索
         if not (use_variants and self.variant_handler):
-            for key, idx in self.mdx.search_prefix(keyword, max_results=50):
+            for key, idx in self.mdx.search_prefix(keyword):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
                     results.append((key, idx))
@@ -179,12 +179,10 @@ class MdxWrapper:
         # 单字搜索词：直接展开所有异体字组合做前缀搜索
         if len(keyword) == 1:
             for v_kw in self.variant_handler.generate_combinations(keyword):
-                for key, idx in self.mdx.search_prefix(v_kw, max_results=50):
+                for key, idx in self.mdx.search_prefix(v_kw):
                     if idx not in seen_idx:
                         seen_idx.add(idx)
                         results.append((key, idx))
-                if len(results) >= 50:
-                    break
             return results
 
         # 多字搜索词（len > 1）：两步方案
@@ -193,7 +191,7 @@ class MdxWrapper:
         regex = self.variant_handler.build_full_regex(keyword, exact=False)
         if regex is None:
             # 构建失败，回退到普通搜索
-            for key, idx in self.mdx.search_prefix(keyword, max_results=50):
+            for key, idx in self.mdx.search_prefix(keyword):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
                     results.append((key, idx))
@@ -202,15 +200,13 @@ class MdxWrapper:
         first_char_variants = sorted(self.variant_handler.get_variants(keyword[0]))
 
         for first_variant in first_char_variants:
-            for key, idx in self.mdx.search_prefix(first_variant, max_results=5000):
+            for key, idx in self.mdx.search_prefix(first_variant):
                 if idx in seen_idx:
                     continue
                 seen_idx.add(idx)
                 # 第二步：内存中用正则精确匹配（正则自然过滤掉长度不足的 key）
                 if regex.match(key):
                     results.append((key, idx))
-                    if len(results) >= 50:
-                        return results
         return results
 
     def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:
@@ -234,7 +230,7 @@ class MdxWrapper:
             return c_stripped
 
         # 兼容旧调用：如果没有传 idx，退回只用 key 查询的逻辑
-        search_res = self.mdx.search_prefix(key, max_results=1)
+        search_res = self.mdx.search_prefix(key)
         if not search_res:
             return ""
         matched_key, idx = search_res[0]
