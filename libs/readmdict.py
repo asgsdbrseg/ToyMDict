@@ -678,12 +678,11 @@ class CachedMDX:
                 self._record_cache.popitem(last=False)
             return block_data
 
-    def search_prefix(self, prefix, max_results=100):
+    def search_prefix(self, prefix):
         """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）
 
         Args:
             prefix: 搜索前缀
-            max_results: 最大结果数
         """
         results = []
         prefix_lower = prefix.lower()
@@ -704,8 +703,6 @@ class CachedMDX:
                     # 只有命中才 decode
                     key_str = key_bytes.decode('utf-8', errors='ignore')
                     results.append((key_str, base_abs_idx + local_idx))
-                    if len(results) >= max_results:
-                        return results
                 elif key_lower_bytes > prefix_bytes:
                     # key 已排序，后续 key 都更大，不可能再匹配
                     stop_outer = True
