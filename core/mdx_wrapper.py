@@ -175,38 +175,32 @@ class MdxWrapper:
                     results.append((key, idx))
             return results
 
-        # ===== 异体字搜索：两步方案 =====
-        # 单字搜索词：直接展开所有异体字组合做前缀搜索
+        # ===== 异体字搜索：首字定位 block（去重）+ 正则匹配 =====
+        first_char_variants = sorted(self.variant_handler.get_variants(keyword[0]))
+
         if len(keyword) == 1:
-            for v_kw in self.variant_handler.generate_combinations(keyword):
-                for key, idx in self.mdx.search_prefix(v_kw):
-                    if idx not in seen_idx:
-                        seen_idx.add(idx)
-                        results.append((key, idx))
+            # 单字：只做首字前缀匹配，无需正则
+            for key, idx in self.mdx.search_variants_prefix(first_char_variants, regex=None):
+                if idx not in seen_idx:
+                    seen_idx.add(idx)
+                    results.append((key, idx))
             return results
 
-        # 多字搜索词（len > 1）：两步方案
-        # 第一步：用第一个字的异体字做前缀搜索（字节级匹配，block 级 skip）
-        # 第二步：在第一步的结果集上用正则过滤剩余字符的异体字组合
+        # 多字：构建完整正则（含所有位置的异体字字符集）
         regex = self.variant_handler.build_full_regex(keyword, exact=False)
         if regex is None:
-            # 构建失败，回退到普通搜索
+            # 无异体字可展开，回退普通搜索
             for key, idx in self.mdx.search_prefix(keyword):
                 if idx not in seen_idx:
                     seen_idx.add(idx)
                     results.append((key, idx))
             return results
 
-        first_char_variants = sorted(self.variant_handler.get_variants(keyword[0]))
-
-        for first_variant in first_char_variants:
-            for key, idx in self.mdx.search_prefix(first_variant):
-                if idx in seen_idx:
-                    continue
+        # 首字变体定位 block（去重），block 内正则匹配
+        for key, idx in self.mdx.search_variants_prefix(first_char_variants, regex=regex):
+            if idx not in seen_idx:
                 seen_idx.add(idx)
-                # 第二步：内存中用正则精确匹配（正则自然过滤掉长度不足的 key）
-                if regex.match(key):
-                    results.append((key, idx))
+                results.append((key, idx))
         return results
 
     def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:

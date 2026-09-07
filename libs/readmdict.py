@@ -711,6 +711,67 @@ class CachedMDX:
                 break
         return results
 
+    def search_variants_prefix(self, first_char_variants, regex=None, max_results=100):
+        """首字变体定位 block（去重），block 内正则匹配
+
+        优化点：
+        - 合并所有首字变体的 block 范围，每个 block 只解压一次
+        - 避免 V 次独立 search_prefix 导致的重叠 block 重复解压
+        - 避免 MAX_KEY_CACHE=10 下的缓存互相驱逐
+
+        Args:
+            first_char_variants: 首字的所有异体字列表
+            regex: 完整正则（含所有位置的异体字字符集），None 表示只做首字前缀匹配
+            max_results: 最大结果数
+        """
+        if not first_char_variants:
+            return []
+
+        results = []
+        # 预编译首字变体的字节前缀（去重）
+        first_variant_bytes = sorted(set(v.lower().encode('utf-8') for v in first_char_variants))
+        min_variant = first_variant_bytes[0].decode('utf-8')
+        max_variant = first_variant_bytes[-1].decode('utf-8')
+
+        # 第一步：计算所有首字变体可能落入的 block 区间（连续）
+        # 因为 key 已排序，所有变体的 block 落在 [min_variant, max_variant] 区间内
+        block_indices = []
+        for idx, meta in enumerate(self._key_blocks_meta):
+            first_lower = meta["first"].lower()
+            last_lower = meta["last"].lower()
+            if last_lower < min_variant:
+                continue
+            if first_lower > max_variant:
+                break
+            block_indices.append(idx)
+
+        # 第二步：按顺序遍历 block，每个只解压一次
+        for idx in block_indices:
+            keys_block = self._get_key_block(idx)
+            base_abs_idx = self._key_count_prefix[idx]
+            for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
+                key_lower_bytes = key_bytes.lower()
+                # 字节级首字前缀检查：匹配任一异体字变体才继续
+                matched = False
+                for fvb in first_variant_bytes:
+                    if key_lower_bytes.startswith(fvb):
+                        matched = True
+                        break
+                if not matched:
+                    continue
+                # 首字匹配后才 decode
+                key_str = key_bytes.decode('utf-8', errors='ignore')
+                if regex is not None:
+                    if regex.match(key_str):
+                        results.append((key_str, base_abs_idx + local_idx))
+                        if len(results) >= max_results:
+                            return results
+                else:
+                    results.append((key_str, base_abs_idx + local_idx))
+                    if len(results) >= max_results:
+                        return results
+        return results
+
     def get_by_index(self, abs_idx):
         with self._file_lock:
             # 用 bisect 在前缀和中定位 key block（O(log n) 替代 O(n) 线性扫描）
