@@ -730,23 +730,22 @@ class CachedMDX:
         results = []
         # 预编译首字变体的字节前缀（去重）
         first_variant_bytes = sorted(set(v.lower().encode('utf-8') for v in first_char_variants))
-        min_variant = first_variant_bytes[0].decode('utf-8')
-        max_variant = first_variant_bytes[-1].decode('utf-8')
 
-        # 第一步：计算所有首字变体可能落入的 block 区间（连续）
-        # 因为 key 已排序，所有变体的 block 落在 [min_variant, max_variant] 区间内
-        block_indices = []
-        for idx, meta in enumerate(self._key_blocks_meta):
-            first_lower = meta["first"].lower()
-            last_lower = meta["last"].lower()
-            if last_lower < min_variant:
-                continue
-            if first_lower > max_variant:
-                break
-            block_indices.append(idx)
+        # 第一步：遍历每个首字变体，分别计算其可能匹配的 block，然后去重
+        # 变体的 block 不一定连续（如 干 U+5E72、乾 U+4E7E、幹 U+5E7F 分散），
+        # 所以不能用 min~max 的连续区间，必须逐个变体计算再合并
+        block_indices = set()
+        for fvb in first_variant_bytes:
+            prefix_lower = fvb.decode('utf-8')
+            for idx, meta in enumerate(self._key_blocks_meta):
+                if meta["last"].lower() < prefix_lower:
+                    continue
+                if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
+                    break
+                block_indices.add(idx)
 
-        # 第二步：按顺序遍历 block，每个只解压一次
-        for idx in block_indices:
+        # 第二步：按顺序遍历去重后的 block，每个只解压一次
+        for idx in sorted(block_indices):
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]
             for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
