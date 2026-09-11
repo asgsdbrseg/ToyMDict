@@ -514,12 +514,8 @@ class CachedMDX:
     def _build_prefix_sums(self):
         """根据 _key_blocks_meta 和 _record_blocks_meta 构建前缀和数组"""
         self._key_count_prefix = [0]
-        self._block_last_keys = []   # 每个 block 的 last key（lower），用于二分查找
-        self._block_first_keys = []  # 每个 block 的 first key（lower）
         for meta in self._key_blocks_meta:
             self._key_count_prefix.append(self._key_count_prefix[-1] + meta["count"])
-            self._block_last_keys.append(meta["last"].lower())
-            self._block_first_keys.append(meta["first"].lower())
         self._rec_decomp_prefix = [0]
         for meta in self._record_blocks_meta:
             self._rec_decomp_prefix.append(self._rec_decomp_prefix[-1] + meta["decomp"])
@@ -743,15 +739,22 @@ class CachedMDX:
         # 变体的 block 不一定连续（如 干 U+5E72、乾 U+4E7E、幹 U+5E7F 分散），
         # 所以必须逐个变体计算再合并
         block_indices = set()
-        last_keys = self._block_last_keys
-        first_keys = self._block_first_keys
+        meta_list = self._key_blocks_meta
+        n_blocks = len(meta_list)
         for fvb in first_variant_bytes:
             prefix_lower = fvb.decode('utf-8')
-            # 二分查找第一个 last >= prefix_lower 的 block（O(log B)）
-            idx = bisect_left(last_keys, prefix_lower)
+            # 手写二分：找第一个 last >= prefix_lower 的 block（O(log B)）
+            lo, hi = 0, n_blocks
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if meta_list[mid]["last"].lower() < prefix_lower:
+                    lo = mid + 1
+                else:
+                    hi = mid
             # 向后遍历，直到 first > prefix_lower（block 已排序，后续不可能匹配）
-            while idx < len(self._key_blocks_meta):
-                first_lower = first_keys[idx]
+            idx = lo
+            while idx < n_blocks:
+                first_lower = meta_list[idx]["first"].lower()
                 if first_lower > prefix_lower and not first_lower.startswith(prefix_lower):
                     break
                 block_indices.add(idx)
