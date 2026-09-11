@@ -514,8 +514,12 @@ class CachedMDX:
     def _build_prefix_sums(self):
         """根据 _key_blocks_meta 和 _record_blocks_meta 构建前缀和数组"""
         self._key_count_prefix = [0]
+        self._block_last_keys = []   # 每个 block 的 last key（lower），用于二分查找
+        self._block_first_keys = []  # 每个 block 的 first key（lower）
         for meta in self._key_blocks_meta:
             self._key_count_prefix.append(self._key_count_prefix[-1] + meta["count"])
+            self._block_last_keys.append(meta["last"].lower())
+            self._block_first_keys.append(meta["first"].lower())
         self._rec_decomp_prefix = [0]
         for meta in self._record_blocks_meta:
             self._rec_decomp_prefix.append(self._rec_decomp_prefix[-1] + meta["decomp"])
@@ -714,10 +718,14 @@ class CachedMDX:
     def search_variants_prefix(self, first_char_variants, regex=None, max_results=100):
         """首字变体定位 block（去重），block 内正则匹配
 
+        流程：
+        1. 对每个首字变体，用二分查找定位其可能匹配的 block（O(log B)）
+        2. 合并去重所有变体的 block，每个 block 只解压一次
+        3. block 内首字前缀匹配（字节级），命中后 decode + 正则过滤
+
         优化点：
-        - 合并所有首字变体的 block 范围，每个 block 只解压一次
-        - 避免 V 次独立 search_prefix 导致的重叠 block 重复解压
-        - 避免 MAX_KEY_CACHE=10 下的缓存互相驱逐
+        - 二分查找替代线性扫描，block 定位从 O(B) 降到 O(log B)
+        - 每个 block 只解压一次，避免 V 次独立搜索的重复解压和缓存驱逐
 
         Args:
             first_char_variants: 首字的所有异体字列表
@@ -731,18 +739,23 @@ class CachedMDX:
         # 预编译首字变体的字节前缀（去重）
         first_variant_bytes = sorted(set(v.lower().encode('utf-8') for v in first_char_variants))
 
-        # 第一步：遍历每个首字变体，分别计算其可能匹配的 block，然后去重
+        # 第一步：遍历每个首字变体，用二分查找定位其可能匹配的 block，然后去重
         # 变体的 block 不一定连续（如 干 U+5E72、乾 U+4E7E、幹 U+5E7F 分散），
-        # 所以不能用 min~max 的连续区间，必须逐个变体计算再合并
+        # 所以必须逐个变体计算再合并
         block_indices = set()
+        last_keys = self._block_last_keys
+        first_keys = self._block_first_keys
         for fvb in first_variant_bytes:
             prefix_lower = fvb.decode('utf-8')
-            for idx, meta in enumerate(self._key_blocks_meta):
-                if meta["last"].lower() < prefix_lower:
-                    continue
-                if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
+            # 二分查找第一个 last >= prefix_lower 的 block（O(log B)）
+            idx = bisect_left(last_keys, prefix_lower)
+            # 向后遍历，直到 first > prefix_lower（block 已排序，后续不可能匹配）
+            while idx < len(self._key_blocks_meta):
+                first_lower = first_keys[idx]
+                if first_lower > prefix_lower and not first_lower.startswith(prefix_lower):
                     break
                 block_indices.add(idx)
+                idx += 1
 
         # 第二步：按顺序遍历去重后的 block，每个只解压一次
         for idx in sorted(block_indices):
