@@ -699,16 +699,14 @@ class CachedMDX:
                 break
         return matches, stop
 
-    def _iter_prefix_matches(self, prefix_lower):
-        """遍历所有可能匹配前缀的 block，逐个 yield (key_str, abs_idx)。
-
-        先用二分查找定位第一个 last >= prefix 的 block（O(log B)），
-        再线性向后扫描，直到 block 的 first > prefix 且不以 prefix 开头，
-        或块内扫描因 key > prefix 提前终止。
+    def search_prefix(self, prefix):
+        """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）
 
         Args:
-            prefix_lower: 已转小写的前缀字符串
+            prefix: 搜索前缀
         """
+        results = []
+        prefix_lower = prefix.lower()
         prefix_bytes = prefix_lower.encode('utf-8')
         meta_list = self._key_blocks_meta
         n_blocks = len(meta_list)
@@ -729,19 +727,11 @@ class CachedMDX:
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]
             matches, stop = self._scan_block_prefix(keys_block, prefix_bytes, base_abs_idx)
-            for m in matches:
-                yield m
+            results.extend(matches)
             if stop:
                 break
             idx += 1
-
-    def search_prefix(self, prefix):
-        """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）
-
-        Args:
-            prefix: 搜索前缀
-        """
-        return list(self._iter_prefix_matches(prefix.lower()))
+        return results
 
     def search_variants_prefix(self, first_char_variants, regex=None, max_results=100):
         """遍历首字变体，二分定位 block，命中即解压并正则匹配
@@ -756,13 +746,35 @@ class CachedMDX:
 
         results = []
         first_variant_bytes = sorted(set(v.lower().encode('utf-8') for v in first_char_variants))
+        meta_list = self._key_blocks_meta
+        n_blocks = len(meta_list)
+
         for fvb in first_variant_bytes:
             prefix_lower = fvb.decode('utf-8')
-            for key_str, abs_idx in self._iter_prefix_matches(prefix_lower):
-                if regex is None or regex.match(key_str):
-                    results.append((key_str, abs_idx))
-                    if len(results) >= max_results:
-                        return results
+            # 二分查找第一个 last >= prefix_lower 的 block（O(log B)）
+            lo, hi = 0, n_blocks
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if meta_list[mid]["last"].lower() < prefix_lower:
+                    lo = mid + 1
+                else:
+                    hi = mid
+            idx = lo
+            while idx < n_blocks:
+                first_lower = meta_list[idx]["first"].lower()
+                if first_lower > prefix_lower and not first_lower.startswith(prefix_lower):
+                    break
+                keys_block = self._get_key_block(idx)
+                base_abs_idx = self._key_count_prefix[idx]
+                matches, stop = self._scan_block_prefix(keys_block, fvb, base_abs_idx)
+                for key_str, abs_idx in matches:
+                    if regex is None or regex.match(key_str):
+                        results.append((key_str, abs_idx))
+                        if len(results) >= max_results:
+                            return results
+                if stop:
+                    break
+                idx += 1
         return results
 
     def get_by_index(self, abs_idx):
