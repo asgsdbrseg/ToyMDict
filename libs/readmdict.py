@@ -712,16 +712,13 @@ class CachedMDX:
         return results
 
     def search_variants_prefix(self, first_char_variants, regex=None, max_results=100):
-        """首字变体定位 block（去重），block 内正则匹配
+        """遍历首字变体，二分定位 block，命中即解压并正则匹配
 
         流程：
-        1. 对每个首字变体，用二分查找定位其可能匹配的 block（O(log B)）
-        2. 合并去重所有变体的 block，每个 block 只解压一次
-        3. block 内首字前缀匹配（字节级），命中后 decode + 正则过滤
-
-        优化点：
-        - 二分查找替代线性扫描，block 定位从 O(B) 降到 O(log B)
-        - 每个 block 只解压一次，避免 V 次独立搜索的重复解压和缓存驱逐
+        对每个首字变体：
+          1. 二分查找定位其可能匹配的 block（O(log B)）
+          2. 命中 block 时直接解压，block 内首字前缀匹配（字节级）
+          3. 命中后 decode + 正则过滤
 
         Args:
             first_char_variants: 首字的所有异体字列表
@@ -734,16 +731,13 @@ class CachedMDX:
         results = []
         # 预编译首字变体的字节前缀（去重）
         first_variant_bytes = sorted(set(v.lower().encode('utf-8') for v in first_char_variants))
-
-        # 第一步：遍历每个首字变体，用二分查找定位其可能匹配的 block，然后去重
-        # 变体的 block 不一定连续（如 干 U+5E72、乾 U+4E7E、幹 U+5E7F 分散），
-        # 所以必须逐个变体计算再合并
-        block_indices = set()
         meta_list = self._key_blocks_meta
         n_blocks = len(meta_list)
+
         for fvb in first_variant_bytes:
             prefix_lower = fvb.decode('utf-8')
-            # 手写二分：找第一个 last >= prefix_lower 的 block（O(log B)）
+            prefix_bytes = fvb
+            # 二分查找第一个 last >= prefix_lower 的 block（O(log B)）
             lo, hi = 0, n_blocks
             while lo < hi:
                 mid = (lo + hi) // 2
@@ -751,40 +745,33 @@ class CachedMDX:
                     lo = mid + 1
                 else:
                     hi = mid
-            # 向后遍历，直到 first > prefix_lower（block 已排序，后续不可能匹配）
+            # 向后遍历命中的 block，直接解压并匹配
             idx = lo
             while idx < n_blocks:
                 first_lower = meta_list[idx]["first"].lower()
                 if first_lower > prefix_lower and not first_lower.startswith(prefix_lower):
                     break
-                block_indices.add(idx)
-                idx += 1
-
-        # 第二步：按顺序遍历去重后的 block，每个只解压一次
-        for idx in sorted(block_indices):
-            keys_block = self._get_key_block(idx)
-            base_abs_idx = self._key_count_prefix[idx]
-            for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
-                key_lower_bytes = key_bytes.lower()
-                # 字节级首字前缀检查：匹配任一异体字变体才继续
-                matched = False
-                for fvb in first_variant_bytes:
-                    if key_lower_bytes.startswith(fvb):
-                        matched = True
-                        break
-                if not matched:
-                    continue
-                # 首字匹配后才 decode
-                key_str = key_bytes.decode('utf-8', errors='ignore')
-                if regex is not None:
-                    if regex.match(key_str):
+                keys_block = self._get_key_block(idx)
+                base_abs_idx = self._key_count_prefix[idx]
+                for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
+                    key_lower_bytes = key_bytes.lower()
+                    # 字节级首字前缀匹配
+                    if not key_lower_bytes.startswith(prefix_bytes):
+                        if key_lower_bytes > prefix_bytes:
+                            break
+                        continue
+                    # 首字匹配后才 decode
+                    key_str = key_bytes.decode('utf-8', errors='ignore')
+                    if regex is not None:
+                        if regex.match(key_str):
+                            results.append((key_str, base_abs_idx + local_idx))
+                            if len(results) >= max_results:
+                                return results
+                    else:
                         results.append((key_str, base_abs_idx + local_idx))
                         if len(results) >= max_results:
                             return results
-                else:
-                    results.append((key_str, base_abs_idx + local_idx))
-                    if len(results) >= max_results:
-                        return results
+                idx += 1
         return results
 
     def get_by_index(self, abs_idx):
