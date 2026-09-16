@@ -54,6 +54,9 @@ HTML_TEMPLATE = """
         .group-panel { width: 50%; display: flex; flex-direction: column; border-right: 1px solid #dee2e6; } 
         .group-panel:last-child { border-right: none; } 
         .group-panel-title { padding: 12px 15px; font-weight: bold; background: #f1f3f5; border-bottom: 1px solid #dee2e6; color: #495057; } 
+        .dict-filter-box { padding: 8px 12px; border-bottom: 1px solid #dee2e6; background: #fafafa; } 
+        .dict-filter-box input { width: 100%; padding: 7px 10px; border: 1px solid #ced4da; border-radius: 4px; outline: none; font-size: 16px; } 
+        .dict-filter-box input:focus { border-color: #2196F3; box-shadow: 0 0 0 2px rgba(33,150,243,0.15); } 
         .group-controls { padding: 15px; display: flex; gap: 10px; border-bottom: 1px solid #dee2e6; background: #fafafa; align-items: center; } 
         .form-control { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; outline: none; } 
         .btn-sm { padding: 6px 12px; border: 1px solid #ced4da; border-radius: 4px; background: #fff; cursor: pointer; } 
@@ -111,6 +114,9 @@ HTML_TEMPLATE = """
         <div class="group-container"> 
             <div class="group-panel"> 
                 <div class="group-panel-title">全部词典 (双击查看详情)</div> 
+                <div class="dict-filter-box">
+                    <input type="text" id="allDictFilter" placeholder="搜索词典名称..." oninput="filterAllDicts(this.value)">
+                </div>
                 <ul id="allDictsList"></ul> 
             </div> 
             <div class="group-panel"> 
@@ -311,6 +317,10 @@ HTML_TEMPLATE = """
                 allList.appendChild(li); 
             }); 
             
+            // 渲染后应用当前过滤条件
+            const filterInput = document.getElementById('allDictFilter');
+            if (filterInput) filterAllDicts(filterInput.value);
+            
             // ===== 渲染右侧：当前分组词典 ===== 
             const groupList = document.getElementById('groupDictsList'); 
             groupList.innerHTML = ''; 
@@ -344,6 +354,17 @@ HTML_TEMPLATE = """
                     li.appendChild(btnGroup); 
                     groupList.appendChild(li); 
                 }); 
+            } 
+        } 
+        function filterAllDicts(keyword) { 
+            const kw = (keyword || '').trim().toLowerCase(); 
+            const list = document.getElementById('allDictsList'); 
+            if (!list) return; 
+            const items = list.getElementsByTagName('li'); 
+            for (let i = 0; i < items.length; i++) { 
+                const span = items[i].querySelector('span'); 
+                const name = span ? span.innerText.toLowerCase() : ''; 
+                items[i].style.display = (!kw || name.includes(kw)) ? '' : 'none'; 
             } 
         } 
         function showDictInfoModal(title, body) { 
