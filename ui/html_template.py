@@ -55,7 +55,7 @@ HTML_TEMPLATE = """
         .group-panel:last-child { border-right: none; } 
         .group-panel-title { padding: 12px 15px; font-weight: bold; background: #f1f3f5; border-bottom: 1px solid #dee2e6; color: #495057; } 
         .dict-filter-box { padding: 8px 12px; border-bottom: 1px solid #dee2e6; background: #fafafa; } 
-        .dict-filter-box input { width: 100%; padding: 7px 10px; border: 1px solid #ced4da; border-radius: 4px; outline: none; font-size: 14px; } 
+        .dict-filter-box input { width: 100%; padding: 7px 10px; border: 1px solid #ced4da; border-radius: 4px; outline: none; font-size: 16px; } 
         .dict-filter-box input:focus { border-color: #2196F3; box-shadow: 0 0 0 2px rgba(33,150,243,0.15); } 
         .group-controls { padding: 15px; display: flex; gap: 10px; border-bottom: 1px solid #dee2e6; background: #fafafa; align-items: center; } 
         .form-control { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; outline: none; } 
