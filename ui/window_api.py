@@ -573,11 +573,10 @@ class WindowApi:
 
                 desc = header_info.get("description", "")
                 if desc:
-                    srcdoc_escaped = html_module.escape(desc, quote=True)
                     parts.append("<p style='margin-top:8px;'><b>描述:</b></p>"
-                                 f"<iframe srcdoc=\"{srcdoc_escaped}\" "
-                                 "style='width:100%;height:150px;border:1px solid #e0e0e0;border-radius:4px;"
-                                 "background:#fff;'></iframe>")
+                                 "<div style='max-height:120px;overflow:auto;background:#f5f5f5;padding:8px;"
+                                 "border-radius:4px;font-size:12px;white-space:pre-wrap;word-break:break-all;'>"
+                                 f"{html_module.escape(desc)}</div>")
 
                 tech = []
                 if header_info.get("version"):
