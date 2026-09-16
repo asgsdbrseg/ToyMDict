@@ -551,12 +551,70 @@ class WindowApi:
         self.init_group_view()
 
     def get_dict_info(self, dict_id):
-        with self._config_lock:
-            all_dicts = list(self.config.get("all_dicts", []))
-        target = next((d for d in all_dicts if d.get("id") == os.path.abspath(dict_id)), None)
-        if target:
+        abs_id = os.path.abspath(dict_id)
+
+        def task():
+            with self._config_lock:
+                all_dicts = list(self.config.get("all_dicts", []))
+            target = next((d for d in all_dicts if d.get("id") == abs_id), None)
+            if not target:
+                return
             title = target.get("name", "未知词典")
-            info_str = (f"<p><b>词典ID:</b> <code>{html_module.escape(dict_id)}</code></p>"
-                        f"<p><b>文件路径:</b> <code>{html_module.escape(target.get('id', '未知'))}</code></p>")
+            header_info = self.manager.get_dict_header_info(abs_id)
+
+            parts = [f"<p><b>文件路径:</b> <code style='word-break:break-all;'>{html_module.escape(target.get('id', '未知'))}</code></p>"]
+
+            if header_info:
+                disp_title = header_info.get("title", "") or "（无）"
+                source = header_info.get("title_source", "")
+                label = f"（来自{'Header' if source == 'header' else '文件名'}）" if source else ""
+                parts.append(f"<p style='margin-top:6px;'><b>标题:</b> {html_module.escape(disp_title)} "
+                             f"<span style='color:#888;font-size:16px;'>{label}</span></p>")
+
+                desc = header_info.get("description", "")
+                if desc:
+                    srcdoc_escaped = html_module.escape(desc, quote=True)
+                    parts.append("<p style='margin-top:8px;'><b>描述:</b></p>"
+                                 f"<iframe srcdoc=\"{srcdoc_escaped}\" ""style='width:100%;height:150px;border:1px solid #e0e0e0;border-radius:4px;""background:#fff;'></iframe>")
+
+                tech = []
+                if header_info.get("version"):
+                    tech.append(f"<li><b>MDX版本:</b> v{html_module.escape(header_info['version'])}</li>")
+                if header_info.get("encoding"):
+                    tech.append(f"<li><b>编码:</b> {html_module.escape(header_info['encoding'])}</li>")
+                if header_info.get("encrypted"):
+                    tech.append(f"<li><b>加密:</b> {html_module.escape(header_info['encrypted'])}</li>")
+                if header_info.get("creation_date"):
+                    tech.append(f"<li><b>创建日期:</b> {html_module.escape(header_info['creation_date'])}</li>")
+                num = header_info.get("num_entries", 0)
+                if num:
+                    tech.append(f"<li><b>词条数:</b> {num:,}</li>")
+                mdd_count = header_info.get("mdd_count", 0)
+                if mdd_count:
+                    tech.append(f"<li><b>MDD文件:</b> {mdd_count}</li>")
+                if tech:
+                    parts.append(f"<p style='margin-top:8px;'><b>技术参数:</b></p>"
+                                 f"<ul style='margin-left:20px;font-size:16px;'>{''.join(tech)}</ul>")
+
+                raw = header_info.get("raw_header", {})
+                if raw:
+                    parts.append("<details style='margin-top:8px;'>"
+                                 "<summary style='cursor:pointer;color:#2196F3;font-size:18px;'>全部 Header 字段</summary>"
+                                 "<div style='max-height:200px;overflow:auto;background:#f5f5f5;padding:8px;"
+                                 "border-radius:4px;font-size:16px;margin-top:6px;'>")
+                    for k, v in raw.items():
+                        shown = v if len(v) <= 300 else v[:300] + "..."
+                        parts.append(f"<p style='margin:2px 0;'><b>{html_module.escape(k)}:</b> "
+                                     f"<code style='word-break:break-all;'>{html_module.escape(shown)}</code></p>")
+                    parts.append("</div></details>")
+
+                if header_info.get("error"):
+                    parts.append(f"<p style='color:#f44336;margin-top:8px;'>⚠ {html_module.escape(header_info['error'])}</p>")
+            else:
+                parts.append("<p style='color:#888;margin-top:8px;'>词典文件未加载，无法读取 Header 信息。</p>")
+
+            info_str = "".join(parts)
             self.window.evaluate_js(
                 f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
+
+        threading.Thread(target=task, daemon=True).start()
