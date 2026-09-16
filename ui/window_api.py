@@ -25,6 +25,9 @@ class WindowApi:
         self._custom_css = ""
         self._load_custom_css()
 
+        # 全局双击 Ctrl 快捷键（选中任意文字后双击 Ctrl 即搜索）
+        self._init_global_hotkey()
+
     def _get_config(self, key, default=None):
         with self._config_lock:
             return self.config.get(key, default)
@@ -560,3 +563,209 @@ class WindowApi:
                         f"<p><b>文件路径:</b> <code>{html_module.escape(target.get('id', '未知'))}</code></p>")
             self.window.evaluate_js(
                 f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
+
+    # ==================== 全局双击 Ctrl 快捷键 ====================
+    def _init_global_hotkey(self):
+        """启动全局键盘监听，实现“双击 Ctrl 搜索选中文字”。
+
+        工作流程：监听全局按键 -> 检测到双击 Ctrl -> 模拟 Ctrl+C 复制当前选中文字
+        -> 读取剪贴板 -> 激活 ToyMDict 窗口 -> 填入搜索框并执行搜索。
+        在程序内、程序外选中文本均可生效。
+        """
+        try:
+            from pynput import keyboard
+        except ImportError:
+            print("[全局快捷键] 未安装 pynput，全局双击 Ctrl 功能不可用。请执行: pip install pynput")
+            return
+
+        self._last_ctrl_time = 0.0
+        self._ctrl_lock = threading.Lock()
+        self._in_hotkey_action = False  # 模拟按键时忽略监听器事件，防止重入
+        self._double_ctrl_delay = 0.35  # 两次 Ctrl 按下的最大间隔(秒)
+        try:
+            self._keyboard_ctrl = keyboard.Controller()
+        except Exception as e:
+            print(f"[全局快捷键] 初始化键盘控制器失败: {e}")
+            return
+
+        def on_press(key):
+            if self._in_hotkey_action:
+                return
+            try:
+                # 判断是否为 Ctrl 键（左/右/通用），用 getattr 兼容不同 pynput 版本
+                ctrl_keys = {keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+                ctrl_generic = getattr(keyboard.Key, 'ctrl', None)
+                if ctrl_generic is not None:
+                    ctrl_keys.add(ctrl_generic)
+                is_ctrl = key in ctrl_keys
+                now = time.time()
+                with self._ctrl_lock:
+                    if is_ctrl:
+                        if self._last_ctrl_time > 0 and (now - self._last_ctrl_time) < self._double_ctrl_delay:
+                            # 第二次 Ctrl 在阈值内 -> 触发双击
+                            self._last_ctrl_time = 0.0
+                            self._in_hotkey_action = True
+                            threading.Thread(target=self._handle_global_double_ctrl, daemon=True).start()
+                        else:
+                            self._last_ctrl_time = now
+                    else:
+                        # 按下其他键重置计时，避免与 Ctrl+C 等组合键冲突
+                        self._last_ctrl_time = 0.0
+            except Exception as e:
+                print(f"[全局快捷键] 按键处理异常: {e}")
+
+        try:
+            self._hotkey_listener = keyboard.Listener(on_press=on_press)
+            self._hotkey_listener.daemon = True
+            self._hotkey_listener.start()
+            print("[全局快捷键] 已启动：在任意程序中选中文字后，双击 Ctrl 即可在 ToyMDict 中搜索")
+        except Exception as e:
+            print(f"[全局快捷键] 启动监听失败: {e}")
+
+    def _handle_global_double_ctrl(self):
+        """双击 Ctrl 触发的处理逻辑（在线程中执行）"""
+        try:
+            from pynput import keyboard
+
+            # 1. 记录剪贴板旧内容，用于判断复制是否成功
+            old_text = self._get_clipboard_text()
+
+            # 2. 模拟 Ctrl+C 复制当前选中的文字
+            self._keyboard_ctrl.press(keyboard.Key.ctrl)
+            self._keyboard_ctrl.press('c')
+            self._keyboard_ctrl.release('c')
+            self._keyboard_ctrl.release(keyboard.Key.ctrl)
+
+            # 3. 轮询剪贴板，等待复制完成
+            selected = ''
+            for _ in range(15):
+                time.sleep(0.03)
+                selected = self._get_clipboard_text()
+                if selected and selected != old_text:
+                    break
+
+            # 兜底：若剪贴板未变化但有内容，也尝试使用
+            if not selected:
+                selected = self._get_clipboard_text()
+            if not selected:
+                return
+
+            # 4. 清理空白（词典排版常含换行/多空格）
+            selected = ' '.join(selected.split()).strip()
+            if not selected:
+                return
+
+            # 5. 激活 ToyMDict 窗口到前台
+            self._activate_window()
+            time.sleep(0.05)
+
+            # 6. 填入搜索框并触发搜索
+            safe_text = json.dumps(selected, ensure_ascii=False)
+            js_code = f"""
+            (function() {{
+                var input = document.getElementById('searchInput');
+                if (input) {{
+                    input.value = {safe_text};
+                    input.focus();
+                    try {{ input.setSelectionRange({len(selected)}, {len(selected)}); }} catch(e) {{}}
+                }}
+                triggerSearch();
+            }})();
+            """
+            self.window.evaluate_js(js_code)
+        except Exception as e:
+            print(f"[全局快捷键] 处理失败: {e}")
+        finally:
+            # 模拟按键结束后恢复监听
+            time.sleep(0.1)
+            self._in_hotkey_action = False
+
+    def _get_clipboard_text(self) -> str:
+        """读取剪贴板文本，依次尝试 pyperclip / tkinter / xclip / xsel。"""
+        # 1. pyperclip（跨平台，需安装）
+        try:
+            import pyperclip
+            text = pyperclip.paste()
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # 2. tkinter（Python 内置）
+        try:
+            import tkinter
+            root = tkinter.Tk()
+            root.withdraw()
+            try:
+                text = root.clipboard_get()
+            finally:
+                root.destroy()
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # 3. xclip（Linux）
+        try:
+            import subprocess
+            text = subprocess.check_output(
+                ['xclip', '-selection', 'clipboard', '-o'],
+                stderr=subprocess.DEVNULL, timeout=2
+            ).decode('utf-8', errors='ignore')
+            if text:
+                return text
+        except Exception:
+            pass
+
+        # 4. xsel（Linux）
+        try:
+            import subprocess
+            text = subprocess.check_output(
+                ['xsel', '--clipboard', '--output'],
+                stderr=subprocess.DEVNULL, timeout=2
+            ).decode('utf-8', errors='ignore')
+            if text:
+                return text
+        except Exception:
+            pass
+
+        return ''
+
+    def _activate_window(self):
+        """将 ToyMDict 窗口置于前台。依次尝试 GTK 原生窗口 / wmctrl / xdotool。"""
+        # 1. 通过 pywebview 内部的 GTK 原生窗口调用 present()
+        try:
+            impl = getattr(self.window, '_impl', None)
+            if impl is not None:
+                for attr in ('native', 'window', '_window'):
+                    native = getattr(impl, attr, None)
+                    if native is not None and hasattr(native, 'present'):
+                        native.present()
+                        return
+        except Exception:
+            pass
+
+        # 2. wmctrl
+        try:
+            import subprocess
+            subprocess.run(['wmctrl', '-a', 'ToyMDict'],
+                           stderr=subprocess.DEVNULL, timeout=2)
+            return
+        except Exception:
+            pass
+
+        # 3. xdotool
+        try:
+            import subprocess
+            subprocess.run(
+                ['xdotool', 'search', '--name', 'ToyMDict', 'windowactivate', '--sync'],
+                stderr=subprocess.DEVNULL, timeout=2)
+            return
+        except Exception:
+            pass
+
+        # 4. 兜底：pywebview 的 show()
+        try:
+            self.window.show()
+        except Exception:
+            pass
