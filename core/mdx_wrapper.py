@@ -161,6 +161,42 @@ class MdxWrapper:
             self._cached_entry_count = 0
             return 0
 
+    def get_header_info(self) -> dict:
+        """返回词典的 Header 元数据信息（供 UI 显示，复用 _print_dict_info 的解析逻辑）"""
+        info = {
+            "title": self.name,
+            "title_source": "filename",
+            "description": "",
+            "version": "",
+            "creation_date": "",
+            "encoding": "",
+            "encrypted": "",
+            "num_entries": 0,
+            "mdd_count": len(self.mdds),
+            "raw_header": {},
+        }
+        try:
+            if not self.mdx or not hasattr(self.mdx, 'base_mdx'):
+                return info
+            header = self.mdx.base_mdx.header
+            info["title"] = self._get_title(header)
+            info["title_source"] = self._get_title_source(header)
+            info["description"] = self._get_description(header)
+            info["version"] = self._decode_field(header.get(b'GeneratedByEngineVersion', b''))
+            info["creation_date"] = self._decode_field(header.get(b'CreationDate', b''))
+            info["encoding"] = self._decode_field(header.get(b'Encoding', b''))
+            info["encrypted"] = self._decode_field(header.get(b'Encrypted', b''))
+            info["num_entries"] = self._get_entry_count()
+            raw = {}
+            for k, v in header.items():
+                key_str = k.decode('utf-8', errors='ignore') if isinstance(k, bytes) else str(k)
+                val_str = v.decode('utf-8', errors='ignore') if isinstance(v, bytes) else str(v)
+                raw[key_str] = val_str
+            info["raw_header"] = raw
+        except Exception as e:
+            info["error"] = str(e)
+        return info
+
     def search(self, keyword: str, use_variants: bool) -> list:
         if not self.loaded or not keyword:
             return []

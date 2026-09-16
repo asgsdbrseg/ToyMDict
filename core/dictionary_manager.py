@@ -107,6 +107,24 @@ class DictionaryManager:
             return "", ""
         return wrapper.get_content(key, idx), wrapper.name
 
+    def get_dict_header_info(self, dict_id: str) -> dict:
+        """获取词典的 Header 元数据信息。词典已加载则直接返回；未加载则临时加载读取后关闭。"""
+        abs_path = os.path.abspath(dict_id)
+        with self._lock:
+            wrapper = self.loaded_dicts.get(abs_path)
+        if wrapper:
+            return wrapper.get_header_info()
+        if not os.path.exists(abs_path):
+            return None
+        from core.mdx_wrapper import MdxWrapper
+        temp_wrapper = MdxWrapper(abs_path)
+        try:
+            if not temp_wrapper.load(variant_handler=None):
+                return None
+            return temp_wrapper.get_header_info()
+        finally:
+            temp_wrapper.close()
+
     def get_resource(self, dict_id: str, path: str) -> bytes:
         abs_path = os.path.abspath(dict_id)
         with self._lock:

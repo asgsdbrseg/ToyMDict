@@ -125,12 +125,12 @@ HTML_TEMPLATE = """
         </div> 
     </div> 
     <div id="dictInfoModal" class="modal" style="z-index: 1001;"> 
-        <div class="modal-content" style="min-width: 400px;"> 
+        <div class="modal-content" style="min-width: 400px; max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;"> 
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;"> 
                 <h3 id="dictInfoTitle" style="margin:0;">词典信息</h3> 
                 <span style="cursor:pointer;font-size:24px;color:#aaa;" onclick="closeDictInfo()">&times;</span> 
             </div> 
-            <div id="dictInfoBody" style="line-height:1.6; font-size:14px;"></div> 
+            <div id="dictInfoBody" style="line-height:1.6; font-size:14px; overflow-y: auto;"></div> 
         </div> 
     </div> 
     <div class="modal" id="addGroupModal"> 
