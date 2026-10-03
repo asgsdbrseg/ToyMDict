@@ -400,6 +400,15 @@ class WindowApi:
 
                 var href = (a.getAttribute('href') || '').trim();
 
+                // 最高优先级：HTML 重写阶段识别出的音频链接（外部/本地音频文件）
+                var dataAudioUrl = a.getAttribute('data-audio-url');
+                if (dataAudioUrl) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    playAudio(dataAudioUrl);
+                    return;
+                }
+
                 // 处理内联 onclick 中通过 new Audio() 播放语音的情况（如在线发音）
                 var onclick = a.getAttribute('onclick') || '';
                 var audioUrl = extractAudioUrl(onclick);

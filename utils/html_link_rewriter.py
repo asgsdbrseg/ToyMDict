@@ -35,6 +35,12 @@ _MDX_PROTOCOL_SCHEMES = (
     'entry://', 'entryx://', 'sound://', 'source://',
 )
 
+# 音频文件扩展名（小写），用于识别 <a href> 中的音频链接
+_AUDIO_EXTENSIONS = frozenset((
+    '.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.wma',
+    '.opus', '.aiff', '.aif', '.amr', '.mid', '.midi', '.mpga',
+))
+
 # 匹配 CSS url(...)，兼容 url("x") / url('x') / url(x) 三种写法
 _CSS_URL_RE = re.compile(
     r'url\(\s*(["\']?)([^"\')\s]+)\1\s*\)',
@@ -66,6 +72,20 @@ def _rewrite_local_path(url: str) -> str:
     if url.startswith('/'):
         return url[1:]
     return url
+
+
+def _is_audio_url(url: str) -> bool:
+    """判断 URL 是否指向音频文件（按扩展名识别，忽略查询参数与 hash）。"""
+    if not url:
+        return False
+    # 去掉查询参数和 hash
+    path = url.split('?', 1)[0].split('#', 1)[0]
+    # 取最后一个 . 之后的部分作为扩展名
+    dot_idx = path.rfind('.')
+    if dot_idx == -1:
+        return False
+    ext = path[dot_idx:].lower()
+    return ext in _AUDIO_EXTENSIONS
 
 
 def _rewrite_attr_value(url: str) -> str:
@@ -149,6 +169,20 @@ def rewrite_html_links(raw_html: str) -> str:
                 if new_val != val:
                     elem.set(attr, new_val)
 
+    # 1.5) 识别 <a href> 中的音频链接，转为 data-audio-url 由点击处理播放，避免被当成页面跳转
+    for elem in wrapper.iter('a'):
+        href = elem.get('href')
+        if not href:
+            continue
+        # 跳过 MDX 专有协议与非音频链接
+        if _is_mdx_protocol(href):
+            continue
+        # 对重写后的路径做音频检测
+        rewritten = _rewrite_attr_value(href)
+        if _is_audio_url(rewritten):
+            elem.set('data-audio-url', rewritten)
+            elem.set('href', '#')
+
     # 2) 处理内联 style 属性中的 url() / @import
     for elem in wrapper.iter():
         style = elem.get('style')
@@ -193,4 +227,20 @@ def _regex_fallback(raw_html: str) -> str:
 
     result = attr_pattern.sub(_attr_repl, raw_html)
     result = _rewrite_css_text(result)
+
+    # 回退方案下同样处理 <a href> 中的音频链接
+    def _audio_href_repl(m):
+        prefix = m.group(1)
+        quote = m.group(2)
+        url = m.group(3)
+        rewritten = _rewrite_attr_value(url)
+        if _is_mdx_protocol(url) or not _is_audio_url(rewritten):
+            return m.group(0)
+        return f'{prefix}href="{quote}#{quote}" data-audio-url="{quote}{rewritten}{quote}"'
+
+    audio_href_pattern = re.compile(
+        r'(<a\b[^>]*?\bhref\s*=\s*)(["\'])([^"\']*)\2',
+        re.IGNORECASE,
+    )
+    result = audio_href_pattern.sub(_audio_href_repl, result)
     return result
