@@ -2,10 +2,10 @@
 import threading
 import json
 import os
-import re
 import html as html_module
 from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.resource_resolver import MdxResourceResolver
+from utils.html_link_rewriter import rewrite_html_links
 import time
 from services import storage
 
@@ -337,16 +337,8 @@ class WindowApi:
         threading.Thread(target=task, daemon=True).start()
 
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
-        raw_html = re.sub(
-            r'(src|href)\s*=\s*(["\'])/(?![/])',
-            r'\1=\2',
-            raw_html
-        )
-        raw_html = re.sub(
-            r'url\(\s*(["\']?)/(?![/])',
-            r'url(\1',
-            raw_html
-        )
+        # 用 lxml 流式重写所有资源链接（替代正则），覆盖多属性与 CSS url()
+        raw_html = rewrite_html_links(raw_html)
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
         head_content = f'<base href="{base_url}">'
@@ -376,10 +368,57 @@ class WindowApi:
         <script>
         (function() {
             var currentAudio = null;
+
+            // 从 onclick 属性中提取音频 URL（兼容 new Audio('url') / "url" / `url` 及反引号包裹的情况）
+            function extractAudioUrl(onclick) {
+                if (!onclick) return null;
+                // 用反向引用匹配同种引号闭合，URL 内容允许包含反引号（紧凑样式表遗留）
+                var m = onclick.match(/new\\s+Audio\\(\\s*(['"`])(.*?)\\1\\s*\\)/);
+                if (!m) return null;
+                var url = m[2].trim();
+                // 去除 MDX 紧凑样式表遗留的反引号包裹
+                url = url.replace(/^`+|`+$/g, '');
+                return url || null;
+            }
+
+            function playAudio(url) {
+                if (!url) return;
+                try {
+                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+                    currentAudio = new Audio(url);
+                    currentAudio.play().catch(function(err) {
+                        console.error("音频播放失败:", err, "URL:", url);
+                    });
+                } catch (err) {
+                    console.error("音频播放异常:", err);
+                }
+            }
+
             document.addEventListener('click', function(e) {
                 var a = e && e.target && e.target.closest('a');
                 if (!a) return;
+
                 var href = (a.getAttribute('href') || '').trim();
+
+                // 最高优先级：HTML 重写阶段识别出的音频链接（外部/本地音频文件）
+                var dataAudioUrl = a.getAttribute('data-audio-url');
+                if (dataAudioUrl) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    playAudio(dataAudioUrl);
+                    return;
+                }
+
+                // 处理内联 onclick 中通过 new Audio() 播放语音的情况（如在线发音）
+                var onclick = a.getAttribute('onclick') || '';
+                var audioUrl = extractAudioUrl(onclick);
+                if (audioUrl) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    playAudio(audioUrl);
+                    return;
+                }
+
                 if (href.toLowerCase().startsWith('entry://')) {
                     e.preventDefault(); e.stopPropagation();
                     var word = decodeURIComponent(href.substring(8));
@@ -392,11 +431,11 @@ class WindowApi:
                     if (soundPath.startsWith('/')) { soundPath = soundPath.substring(1); }
                     var baseUrl = document.baseURI;
                     var soundUrl = baseUrl + soundPath;
-                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-                    currentAudio = new Audio(soundUrl);
-                    currentAudio.play().catch(function(err) {
-                        console.error("音频播放失败:", err, "URL:", soundUrl);
-                    });
+                    playAudio(soundUrl);
+                }
+                else if (!href) {
+                    // 无 href 的 <a>：阻止可能的默认跳转行为
+                    e.preventDefault();
                 }
             }, true);
         })();

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-from typing import List, Dict, Optional
+import html as html_module
+from typing import List, Dict, Optional, Set
 from libs.readmdict import CachedMDX, CachedMDD
 
 class MdxWrapper:
@@ -245,34 +246,46 @@ class MdxWrapper:
                     results.append((key, idx))
         return results
 
-    def get_content(self, key: str, idx: int = None, _link_depth: int = 0) -> str:
-        if idx is not None:
-            try:
-                c = self.mdx.get_by_index(idx)
-            except Exception as e:
-                return f'<div style="padding:8px;color:red;">⚠ 内容解析失败：{e}</div>'
-            if not c:
+    def get_content(self, key: str, idx: int = None, _visited: Set[int] = None) -> str:
+        """获取词条内容，支持 @@@LINK= 递归解析与循环检测。
+
+        Args:
+            key: 词条文本
+            idx: 词条在词典中的绝对索引；为 None 时按 key 精确查找
+            _visited: 已访问的词条索引集合（内部用于循环检测）
+        """
+        if _visited is None:
+            _visited = set()
+
+        # 未提供 idx 时，按 key 做精确匹配查找
+        if idx is None:
+            search_res = self.mdx.search_prefix(key)
+            if not search_res:
+                return ""
+            matched_key, idx = search_res[0]
+            if matched_key != key:
                 return ""
 
-            c_stripped = c.strip() if isinstance(c, str) else c.decode('utf-8', errors='ignore').strip()
-            if c_stripped.startswith("@@@LINK="):
-                # 递归深度限制，防止循环引用导致栈溢出
-                if _link_depth >= 10:
-                    return f'<div style="padding:8px;color:#888;">⚠ 参见层级过深：<b>{key}</b></div>'
-                target_word = c_stripped.replace("@@@LINK=", "").strip()
-                if target_word:
-                    target_html = self.get_content(target_word, _link_depth=_link_depth + 1)
-                    return target_html if target_html else f'<div style="padding:8px;color:#888;">🔗 参见词条：<b>{target_word}</b></div>'
-            return c_stripped
+        # 循环检测：同一词条索引不可被重复解析
+        if idx in _visited:
+            return f'<div style="padding:8px;color:#888;">⚠ 检测到参见循环，已终止：<b>{html_module.escape(key)}</b></div>'
 
-        # 兼容旧调用：如果没有传 idx，退回只用 key 查询的逻辑
-        search_res = self.mdx.search_prefix(key)
-        if not search_res:
+        try:
+            c = self.mdx.get_by_index(idx)
+        except Exception as e:
+            return f'<div style="padding:8px;color:red;">⚠ 内容解析失败：{e}</div>'
+        if not c:
             return ""
-        matched_key, idx = search_res[0]
-        if matched_key != key:
-            return ""
-        return self.get_content(key, idx)
+
+        c_stripped = c.strip() if isinstance(c, str) else c.decode('utf-8', errors='ignore').strip()
+        if c_stripped.startswith("@@@LINK="):
+            target_word = c_stripped[len("@@@LINK="):].strip()
+            if target_word:
+                # 标记当前词条已访问，再递归解析目标词条
+                _visited.add(idx)
+                target_html = self.get_content(target_word, _visited=_visited)
+                return target_html if target_html else f'<div style="padding:8px;color:#888;">🔗 参见词条：<b>{html_module.escape(target_word)}</b></div>'
+        return c_stripped
 
     def get_resource(self, path: str) -> bytes:
         """按顺序在多个 MDD 中查找资源"""
