@@ -152,7 +152,10 @@ class MDict(object):
         elif encryption_method == 2: decrypted_block = _salsa_decrypt(data[:encryption_size], encrypted_key) + data[encryption_size:]
         else: raise Exception('encryption method %d not supported' % encryption_method)
 
-        if self._version >= 3: assert(hex(adler32) == hex(zlib.adler32(decrypted_block) & 0xffffffff))
+        if self._version >= 3:
+            actual = zlib.adler32(decrypted_block) & 0xffffffff
+            if adler32 != actual:
+                raise ValueError(f"MDX 数据块校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
 
         if compression_method == 0: decompressed_block = decrypted_block
         elif compression_method == 1:
@@ -162,18 +165,24 @@ class MDict(object):
         elif compression_method == 2: decompressed_block = zlib.decompress(decrypted_block)
         else: raise Exception('compression method %d not supported' % compression_method)
 
-        if self._version < 3: assert(hex(adler32) == hex(zlib.adler32(decompressed_block) & 0xffffffff))
+        if self._version < 3:
+            actual = zlib.adler32(decompressed_block) & 0xffffffff
+            if adler32 != actual:
+                raise ValueError(f"MDX 解压数据校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
         return decompressed_block
 
     def _decode_key_block_info(self, key_block_info_compressed):
         if self._version >= 2:
-            assert(key_block_info_compressed[:4] == b'\x02\x00\x00\x00')
+            if key_block_info_compressed[:4] != b'\x02\x00\x00\x00':
+                raise ValueError("MDX key block info 魔数不匹配")
             if self._encrypt & 0x02:
                 key = ripemd128(key_block_info_compressed[4:8] + pack(b'<L', 0x3695))
                 key_block_info_compressed = key_block_info_compressed[:8] + _fast_decrypt(key_block_info_compressed[8:], key)
             key_block_info = zlib.decompress(key_block_info_compressed[8:])
             adler32 = unpack('>I', key_block_info_compressed[4:8])[0]
-            assert(adler32 == zlib.adler32(key_block_info) & 0xffffffff)
+            actual = zlib.adler32(key_block_info) & 0xffffffff
+            if adler32 != actual:
+                raise ValueError(f"MDX key block info 校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
         else:
             key_block_info = key_block_info_compressed
 
@@ -229,7 +238,9 @@ class MDict(object):
             header_bytes_size = unpack('>I', f.read(4))[0]
             header_bytes = f.read(header_bytes_size)
             adler32 = unpack('<I', f.read(4))[0]
-            assert(adler32 == zlib.adler32(header_bytes) & 0xffffffff)
+            actual = zlib.adler32(header_bytes) & 0xffffffff
+            if adler32 != actual:
+                raise ValueError(f"MDX 头部校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
             self._key_block_offset = f.tell()
 
         if header_bytes[-2:] == b'\x00\x00': header_text = header_bytes[:-2].decode('utf-16').encode('utf-8')
@@ -327,7 +338,9 @@ class MDict(object):
             key_block_type = b'\x02\x00\x00\x00' if self._version >= 2.0 else b'\x01\x00\x00\x00'
             block = f.read(num_bytes)
             key_block_info = f.read(8)
-            if self._version >= 2.0: assert key_block_info[:4] == b'\x02\x00\x00\x00'
+            if self._version >= 2.0:
+                if key_block_info[:4] != b'\x02\x00\x00\x00':
+                    raise ValueError("MDX 暴力解析: key block info 魔数不匹配")
             while True:
                 fpos = f.tell()
                 t = f.read(1024)
@@ -378,7 +391,8 @@ class MDict(object):
             f.seek(self._record_block_offset)
             num_record_blocks = self._read_number(f)
             num_entries = self._read_number(f)
-            assert(num_entries == self._num_entries)
+            if num_entries != self._num_entries:
+                raise ValueError(f"MDX 记录数不匹配: 期望 {self._num_entries}, 实际 {num_entries}")
             record_block_info_size = self._read_number(f)
             record_block_size = self._read_number(f)
             record_block_info_list = []
@@ -388,7 +402,8 @@ class MDict(object):
                 decompressed_size = self._read_number(f)
                 record_block_info_list += [(compressed_size, decompressed_size)]
                 size_counter += self._number_width * 2
-            assert(size_counter == record_block_info_size)
+            if size_counter != record_block_info_size:
+                raise ValueError(f"MDX record block info 大小不匹配: 期望 {record_block_info_size}, 实际 {size_counter}")
             offset = 0; i = 0; size_counter = 0
             for compressed_size, decompressed_size in record_block_info_list:
                 record_block = self._decode_block(f.read(compressed_size), decompressed_size)
@@ -399,7 +414,8 @@ class MDict(object):
                     i += 1
                     yield key_text, self._treat_record_data(record_block[record_start-offset:record_end-offset])
                 offset += len(record_block); size_counter += compressed_size
-            assert(size_counter == record_block_size)
+            if size_counter != record_block_size:
+                raise ValueError(f"MDX record block 大小不匹配: 期望 {record_block_size}, 实际 {size_counter}")
 
     def _read_record_index(self):
         with open(self._fname, 'rb') as f:
@@ -717,7 +733,6 @@ class CachedMDX:
             i = bisect_right(self._key_count_prefix, abs_idx) - 1
             if i < 0 or i >= len(self._key_blocks_meta):
                 return None
-            meta = self._key_blocks_meta[i]
             keys_block = self._get_key_block(i)
             local_idx = abs_idx - self._key_count_prefix[i]
             if local_idx < 0 or local_idx >= len(keys_block):
@@ -733,23 +748,19 @@ class CachedMDX:
             rb_start_offset = self._rec_decomp_prefix[target_rb_idx]  # O(1) 替代 sum
             rb_end_offset = rb_start_offset + len(rec_block)
 
-            # 【修复】：精准计算 end_offset，解决"加载下一区块内容"的问题
+            # 计算结束偏移：取下一词条的起始偏移；若为最后一条则用 record_block 末尾
             if local_idx + 1 < len(keys_block):
-                # 下一个词条在同一个 key_block 中
+                # 下一词条在同一 key_block 中
                 end_offset = keys_block[local_idx + 1][0]
+            elif i + 1 < len(self._key_blocks_meta):
+                # 当前为 key_block 末条，取下一 key_block 的首条偏移
+                next_block = self._get_key_block(i + 1)
+                end_offset = next_block[0][0] if next_block else rb_end_offset
             else:
-                # 当前词条是 key_block 的最后一条，需要去下一个 key_block 找下一个词条的起始偏移
+                # 已是最后一个 key_block 的最后一条
                 end_offset = rb_end_offset
-                for next_i in range(i + 1, len(self._key_blocks_meta)):
-                    next_keys_block = self._get_key_block(next_i)
-                    if next_keys_block:
-                        next_start = next_keys_block[0][0]
-                        # 如果下一个词条的起始偏移还在当前 record_block 内，则用它作为结束边界
-                        if next_start < rb_end_offset:
-                            end_offset = next_start
-                        break
 
-            # 安全保底：绝不能超过 record_block 的物理边界
+            # 安全保底：不超过当前 record_block 的物理边界
             if end_offset > rb_end_offset:
                 end_offset = rb_end_offset
 

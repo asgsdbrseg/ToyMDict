@@ -2,10 +2,10 @@
 import threading
 import json
 import os
-import re
 import html as html_module
 from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.resource_resolver import MdxResourceResolver
+from utils.html_link_rewriter import rewrite_html_links
 import time
 from services import storage
 
@@ -337,16 +337,8 @@ class WindowApi:
         threading.Thread(target=task, daemon=True).start()
 
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
-        raw_html = re.sub(
-            r'(src|href)\s*=\s*(["\'])/(?![/])',
-            r'\1=\2',
-            raw_html
-        )
-        raw_html = re.sub(
-            r'url\(\s*(["\']?)/(?![/])',
-            r'url(\1',
-            raw_html
-        )
+        # 用 lxml 流式重写所有资源链接（替代正则），覆盖多属性与 CSS url()
+        raw_html = rewrite_html_links(raw_html)
         url_safe_dict_id = safe_url_encode(dict_id)
         base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
         head_content = f'<base href="{base_url}">'
