@@ -2,12 +2,69 @@
 import threading
 import json
 import os
+import atexit
+import traceback
 import html as html_module
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.resource_resolver import MdxResourceResolver
 from utils.html_link_rewriter import rewrite_html_links
 import time
 from services import storage
+
+
+# ==================== 模块级线程池 ====================
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """工作线程为 daemon 的线程池：主线程退出时进程可正常终止，
+    避免 ThreadPoolExecutor 默认创建非 daemon 线程导致程序无法退出。
+
+    由于父类 _adjust_thread_count 会先 start 线程再返回，已 active 的线程
+    无法再修改 daemon；这里在调用父类的极短窗口内把 threading.Thread 的
+    daemon 默认值临时注入为 True（加锁避免并发竞态），不依赖私有内部结构。"""
+
+    _patch_lock = threading.Lock()
+
+    def _adjust_thread_count(self):
+        with self._patch_lock:
+            _orig_init = threading.Thread.__init__
+
+            def _daemon_init(self_t, *args, **kwargs):
+                kwargs.setdefault("daemon", True)
+                _orig_init(self_t, *args, **kwargs)
+
+            threading.Thread.__init__ = _daemon_init
+            try:
+                super()._adjust_thread_count()
+            finally:
+                threading.Thread.__init__ = _orig_init
+
+
+# 复用模块级线程池，替代每次请求都新建 threading.Thread（后台控制类任务）
+_TASK_EXECUTOR = _DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="window-api")
+# 复用模块级线程池，替代 show_entry 中每次调用新建的局部线程池（用于并行加载词条内容）
+_LOAD_EXECUTOR = _DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="load-entry")
+
+
+def _report_future_error(future):
+    """Future 异常回调：保持与原 threading.Thread 同等的错误可见性。"""
+    try:
+        future.result()
+    except Exception:
+        traceback.print_exc()
+
+
+def _submit_task(fn, *args, **kwargs):
+    """提交后台任务到模块级线程池，异常时打印堆栈。"""
+    future = _TASK_EXECUTOR.submit(fn, *args, **kwargs)
+    future.add_done_callback(_report_future_error)
+    return future
+
+
+@atexit.register
+def _shutdown_executors():
+    _TASK_EXECUTOR.shutdown(wait=False)
+    _LOAD_EXECUTOR.shutdown(wait=False)
+
 
 class WindowApi:
     def __init__(self, window, manager, resource_server):
@@ -155,7 +212,7 @@ class WindowApi:
                     self._cleanup_invalid_paths(invalid_paths)
             self._refresh_ui()
             self._inject_custom_css_to_framework()
-        threading.Thread(target=task, daemon=True).start()
+        _submit_task(task)
 
     def _refresh_ui(self):
         try:
@@ -189,7 +246,7 @@ class WindowApi:
             from webview import FileDialog
             paths = self.window.create_file_dialog(FileDialog.OPEN, allow_multiple=True, file_types=('MDX (*.mdx)',))
             if paths:
-                threading.Thread(target=self._load_mdx_batch, args=(paths,), daemon=True).start()
+                _submit_task(self._load_mdx_batch, paths)
         except Exception as e:
             print(e)
 
@@ -201,7 +258,7 @@ class WindowApi:
                 from utils.path_helper import find_mdx_files
                 mdx_files = find_mdx_files(folders[0])
                 if mdx_files:
-                    threading.Thread(target=self._load_mdx_batch, args=(mdx_files,), daemon=True).start()
+                    _submit_task(self._load_mdx_batch, mdx_files)
                 else:
                     print("该文件夹下未找到 MDX 文件")
         except Exception as e:
@@ -235,7 +292,7 @@ class WindowApi:
                     self._cleanup_invalid_paths(invalid_paths)
                 self._auto_search_after_switch()
 
-            threading.Thread(target=switch_task, daemon=True).start()
+            _submit_task(switch_task)
 
     def _auto_search_after_switch(self):
         try:
@@ -282,7 +339,7 @@ class WindowApi:
             if first_match:
                 self.show_entry(0)
 
-        threading.Thread(target=task, daemon=True).start()
+        _submit_task(task)
 
     def show_entry(self, index: int):
         with self._results_lock:
@@ -306,19 +363,16 @@ class WindowApi:
                 )
                 return
 
-            # 多词典并行加载
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            # 多词典并行加载（复用模块级 _LOAD_EXECUTOR，不再每次新建线程池）
             render_list = [None] * len(sources)
-            workers = min(len(sources), 10)
 
             def _load_one(i, source):
                 idx = source.get("idx")
                 raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
                 return i, raw_html
 
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = [executor.submit(_load_one, i, s) for i, s in enumerate(sources)]
-                for future in as_completed(futures):
+            futures = [_LOAD_EXECUTOR.submit(_load_one, i, s) for i, s in enumerate(sources)]
+            for future in as_completed(futures):
                     try:
                         i, raw_html = future.result()
                     except Exception as e:
@@ -334,7 +388,7 @@ class WindowApi:
             if render_list:
                 self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
 
-        threading.Thread(target=task, daemon=True).start()
+        _submit_task(task)
 
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
         # 用 lxml 流式重写所有资源链接（替代正则），覆盖多属性与 CSS url()
@@ -656,4 +710,4 @@ class WindowApi:
             self.window.evaluate_js(
                 f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
 
-        threading.Thread(target=task, daemon=True).start()
+        _submit_task(task)
