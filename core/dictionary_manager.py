@@ -117,7 +117,8 @@ class DictionaryManager:
         if not os.path.exists(abs_path):
             return None
         from core.mdx_wrapper import MdxWrapper
-        temp_wrapper = MdxWrapper(abs_path)
+        # 仅读 header，避免为查看词典信息而触发全量索引构建（尤其词典在只读/网络盘时）
+        temp_wrapper = MdxWrapper(abs_path, build_index=False)
         try:
             if not temp_wrapper.load(variant_handler=None):
                 return None

@@ -6,13 +6,16 @@ from typing import List, Dict, Optional, Set
 from libs.readmdict import CachedMDX, CachedMDD
 
 class MdxWrapper:
-    def __init__(self, mdx_path: str):
+    def __init__(self, mdx_path: str, build_index: bool = True):
         self.mdx_path = mdx_path
         self.folder_path = os.path.dirname(mdx_path)
         self.path = mdx_path
         self.name = os.path.splitext(os.path.basename(mdx_path))[0]
         self.dict_id = os.path.abspath(mdx_path)
-        
+
+        # False 时仅读取 header（用于查看词典信息），不构建可搜索索引
+        self._build_index = build_index
+
         self.mdx = None
         self.mdds: List[CachedMDD] = []  # 修改：支持多个 MDD
         self.loaded = False
@@ -23,21 +26,23 @@ class MdxWrapper:
         # 新任务开始：空行分隔 + 显示路径
         print(f"\n[词典] {self.path}")
         try:
-            self.mdx = CachedMDX(self.path, encoding='utf-8')
-            
-            # 加载主 MDD：name.mdd
-            mdd_path = os.path.join(self.folder_path, self.name + '.mdd')
-            if os.path.exists(mdd_path):
-                self.mdds.append(CachedMDD(mdd_path, encoding='utf-8'))
-                
-            # 加载分卷 MDD：name.1.mdd, name.2.mdd ...
-            seq = 1
-            while True:
-                seq_mdd_path = os.path.join(self.folder_path, f"{self.name}.{seq}.mdd")
-                if not os.path.exists(seq_mdd_path):
-                    break
-                self.mdds.append(CachedMDD(seq_mdd_path, encoding='utf-8'))
-                seq += 1
+            self.mdx = CachedMDX(self.path, encoding='utf-8', build_index=self._build_index)
+
+            # 仅读 header 模式：不需要 MDD 资源，跳过 MDD 检测与索引构建
+            if self._build_index:
+                # 加载主 MDD：name.mdd
+                mdd_path = os.path.join(self.folder_path, self.name + '.mdd')
+                if os.path.exists(mdd_path):
+                    self.mdds.append(CachedMDD(mdd_path, encoding='utf-8'))
+
+                # 加载分卷 MDD：name.1.mdd, name.2.mdd ...
+                seq = 1
+                while True:
+                    seq_mdd_path = os.path.join(self.folder_path, f"{self.name}.{seq}.mdd")
+                    if not os.path.exists(seq_mdd_path):
+                        break
+                    self.mdds.append(CachedMDD(seq_mdd_path, encoding='utf-8'))
+                    seq += 1
                 
             self.variant_handler = variant_handler
             self.loaded = True
@@ -162,6 +167,17 @@ class MdxWrapper:
             self._cached_entry_count = 0
             return 0
 
+    def _count_mdd_files(self) -> int:
+        """仅做存在性检查统计 MDD 文件数（不构建索引，开销极小）"""
+        count = 0
+        if os.path.exists(os.path.join(self.folder_path, self.name + '.mdd')):
+            count += 1
+        seq = 1
+        while os.path.exists(os.path.join(self.folder_path, f"{self.name}.{seq}.mdd")):
+            count += 1
+            seq += 1
+        return count
+
     def get_header_info(self) -> dict:
         """返回词典的 Header 元数据信息（供 UI 显示，复用 _print_dict_info 的解析逻辑）"""
         info = {
@@ -173,7 +189,9 @@ class MdxWrapper:
             "encoding": "",
             "encrypted": "",
             "num_entries": 0,
-            "mdd_count": len(self.mdds),
+            # 已加载（含 MDD 索引）时直接用列表长度；仅读 header 模式下列表为空，
+            # 退化为轻量存在性统计，保证显示的 MDD 数量准确
+            "mdd_count": len(self.mdds) if self.mdds else self._count_mdd_files(),
             "raw_header": {},
         }
         try:
