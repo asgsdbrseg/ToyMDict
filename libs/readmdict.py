@@ -477,7 +477,7 @@ class CachedMDX:
     MAX_RECORD_CACHE = 5
     MAX_KEY_CACHE = 10
 
-    def __init__(self, fname, encoding='utf-8'):
+    def __init__(self, fname, encoding='utf-8', build_index=True):
         self.fname = fname
         self.base_mdx = MDX(fname, build_index=False)
         self.encoding = encoding
@@ -494,7 +494,13 @@ class CachedMDX:
         self._file_lock = threading.RLock()
         # 持久文件句柄，避免每次读取都 open/close
         self._fh = open(self.fname, 'rb')
-        self._load_or_build_index()
+        if build_index:
+            # 完整模式：读取并解压全部 key/record 块，构建可搜索索引
+            self._load_or_build_index()
+        else:
+            # 仅读 header 模式（如查看词典信息）：跳过全量索引构建，
+            # 此时 self.base_mdx.header 已可用，仅需构造空前缀和
+            self._build_prefix_sums()
 
     def _get_cache_path(self):
         return self.fname + ".meta.cache.json"
