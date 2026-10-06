@@ -311,15 +311,6 @@ class MdxWrapper:
             try:
                 data = mdd.get(path)
                 if data is not None:
-                    if isinstance(data, str):
-                        try:
-                            return data.encode('utf-8')
-                        except UnicodeEncodeError:
-                            try:
-                                return data.encode('gbk', errors='ignore')
-                            except Exception as e:
-                                print(f"[警告] 编码转换失败: {e}")
-                                return data.encode('utf-8', errors='ignore')
                     return data
             except Exception:
                 continue

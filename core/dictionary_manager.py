@@ -24,14 +24,12 @@ class DictionaryManager:
                 
             with open(json_path, 'r', encoding='utf-8') as f:
                 variants = json.load(f)
-                
-            variant_dict = dict(variants)
-                
+                                
             print(f"[异体字] 映射表: {json_path}")
-            self._variant_handler = VariantHandler(variant_dict)
+            self._variant_handler = VariantHandler(variants)
             
             # 输出统计信息（在 VariantHandler 构建完成后才能获取准确的字符数）
-            rule_count = len(variant_dict)  # 规则组数（JSON 中的顶级键数量）
+            rule_count = len(variants)  # 规则组数（JSON 中的顶级键数量）
             char_count = len(self._variant_handler.variant_map)  # 实际覆盖的字符数（构建后）
             print(f"  {rule_count} 组规则, {char_count} 个字符")
         except Exception as e:
