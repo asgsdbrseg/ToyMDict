@@ -3,10 +3,9 @@ import os
 import gzip
 import io
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse
 from utils.resource_resolver import MdxResourceResolver
-from utils.path_helper import get_mime_type, safe_url_encode
-from utils.path_helper import normalize_resource_path
+from utils.path_helper import get_mime_type
 
 
 class ResourceHandler(BaseHTTPRequestHandler):
@@ -35,12 +34,6 @@ class ResourceHandler(BaseHTTPRequestHandler):
         """
         data = MdxResourceResolver.resolve_resource(self.dict_manager, dict_id, path)
         if data:
-            # 转成 bytes
-            if isinstance(data, str):
-                try:
-                    data = data.encode("utf-8")
-                except Exception:
-                    data = data.encode("gbk", errors="ignore")
             mime = get_mime_type(path) or "application/octet-stream"
             return data, mime
         return None, None
@@ -55,10 +48,8 @@ class ResourceHandler(BaseHTTPRequestHandler):
                 parts = rest.split("/", 1)
                 if len(parts) == 2:
                     dict_id_raw, path_raw = parts
-                    dict_id = unquote(dict_id_raw)
-                    path = normalize_resource_path(path_raw)
 
-                    data, mime = self._resolve_resource(dict_id, path)
+                    data, mime = self._resolve_resource(dict_id_raw, path_raw)
                     if data:
                         if self._should_gzip(mime, data):
                             buf = io.BytesIO()
@@ -71,6 +62,7 @@ class ResourceHandler(BaseHTTPRequestHandler):
                             self.send_header("Cache-Control", "public, max-age=31536000")
                             self.send_header("Content-Length", str(len(compressed)))
                             self.send_header('Access-Control-Allow-Origin', '*')
+                            self.send_header('Vary', 'Accept-Encoding')
                             self.end_headers()
                             self.wfile.write(compressed)
                             return

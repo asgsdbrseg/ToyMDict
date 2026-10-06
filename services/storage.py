@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+from utils.path_helper import get_app_base_dir
 
-CONFIG_FILE = "dict_groups.json"
+CONFIG_FILE = os.path.join(get_app_base_dir(), "dict_groups.json")
 
 def load_config():
     """读取配置，返回包含 all_dicts, groups, current_group 的字典"""
