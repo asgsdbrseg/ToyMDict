@@ -49,7 +49,8 @@ def main():
         hotkey = GlobalHotkeyService(window, enabled=True)
         hotkey.start()
 
-        webview.start(debug=False)
+        webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
+        webview.start(debug=True)
     finally:
         if hotkey is not None:
             hotkey.stop()
