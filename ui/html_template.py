@@ -168,6 +168,13 @@ HTML_TEMPLATE = """
             const use_variants = document.getElementById('variantCheck').checked;
             if(keyword) pywebview.api.search(keyword, use_variants);
         }
+        function externalSearch(keyword) {
+            keyword = (keyword || '').trim();
+            if (!keyword) return;
+            var input = document.getElementById('searchInput');
+            if (input) input.value = keyword;
+            triggerSearch();
+        }
         function updateUI(data) {
             const optHtml = data.groups.map(g => {
                 const name = escapeHtml(g.name);
