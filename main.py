@@ -2,6 +2,7 @@
 import webview
 from core.dictionary_manager import DictionaryManager
 from services.resource_server import ResourceServer
+from services.global_hotkey import GlobalHotkeyService
 from ui.window_api import WindowApi
 from ui.html_template import HTML_TEMPLATE
 
@@ -14,6 +15,7 @@ def main():
     server = ResourceServer(manager)
     server.start()
 
+    hotkey = None
     try:
         # 创建窗口
         window = webview.create_window(
@@ -43,8 +45,14 @@ def main():
             api.move_dict,
         )
 
+        # 全局快捷键：双击 Ctrl 将选中的文字发送到搜索框（默认常开，不可关闭）
+        hotkey = GlobalHotkeyService(window, enabled=True)
+        hotkey.start()
+
         webview.start(debug=False)
     finally:
+        if hotkey is not None:
+            hotkey.stop()
         server.stop()
 
 if __name__ == '__main__':

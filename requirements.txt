@@ -2,3 +2,5 @@ pywebview>=3.5.0
 xxhash>=1.2.0
 python-lzo>=1.12
 lxml>=4.9.0
+pynput>=1.7.6
+pyperclip>=1.8.2
