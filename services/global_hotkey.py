@@ -169,11 +169,13 @@ class GlobalHotkeyService:
             self._copy_selection()
             new = self._get_clipboard()
 
-            text = None
-            if new is not None and old is not None and new != old:
-                text = new.strip()
-            elif new is not None and old is None and new.strip():
-                text = new.strip()
+            # 候选文字判定：
+            #   优先使用复制动作之后的剪贴板内容（new），它对应「当前选中文字」；
+            #   若复制未改变剪贴板（例如用户早已手动 Ctrl+C 过该文字），则回退到
+            #   复制前的剪贴板内容（old）。这样「选中后直接双击 Ctrl」与
+            #   「先 Ctrl+C 再双击 Ctrl」两种用法都能命中。
+            candidate = new if (new and new.strip()) else old
+            text = candidate.strip() if (candidate and candidate.strip()) else None
 
             # 还原用户原来的剪贴板内容
             if self.restore_clipboard and old is not None:
