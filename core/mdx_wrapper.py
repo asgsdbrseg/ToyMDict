@@ -275,13 +275,10 @@ class MdxWrapper:
         if _visited is None:
             _visited = set()
 
-        # 未提供 idx 时，按 key 做精确匹配查找
+        # 未提供 idx 时，按 key 做精确二分定位 + 相等比较查找
         if idx is None:
-            search_res = self.mdx.search_prefix(key)
-            if not search_res:
-                return ""
-            matched_key, idx = search_res[0]
-            if matched_key != key:
+            idx = self.mdx.lookup_key(key)
+            if idx is None:
                 return ""
 
         # 循环检测：同一词条索引不可被重复解析

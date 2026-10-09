@@ -3,6 +3,33 @@ from core.mdx_wrapper import MdxWrapper
 import os
 import json
 import threading
+import atexit
+import concurrent.futures
+
+
+class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """工作线程为 daemon 的线程池：主线程退出时进程可正常终止，
+    避免 ThreadPoolExecutor 默认创建非 daemon 线程导致程序无法退出。
+
+    由于父类 _adjust_thread_count 会先 start 线程再返回，已 active 的线程
+    无法再修改 daemon；这里在调用父类的极短窗口内把 threading.Thread 的
+    daemon 默认值临时注入为 True（加锁避免并发竞态），不依赖私有内部结构。"""
+    _patch_lock = threading.Lock()
+
+    def _adjust_thread_count(self):
+        with self._patch_lock:
+            _orig_init = threading.Thread.__init__
+
+            def _daemon_init(self_t, *args, **kwargs):
+                kwargs.setdefault("daemon", True)
+                _orig_init(self_t, *args, **kwargs)
+
+            threading.Thread.__init__ = _daemon_init
+            try:
+                super()._adjust_thread_count()
+            finally:
+                threading.Thread.__init__ = _orig_init
+
 
 class DictionaryManager:
     def __init__(self):
@@ -10,6 +37,10 @@ class DictionaryManager:
         self._lock = threading.RLock()
         self._variant_handler = None
         self._init_variant_handler()
+        # daemon 线程池：在后台线程内并行搜索多本词典，避免进程退出挂起
+        self._search_executor = _DaemonThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="dict-search")
+        atexit.register(self._search_executor.shutdown, wait=False)
 
     def _init_variant_handler(self):
         try:
@@ -78,10 +109,25 @@ class DictionaryManager:
         if not wrappers or not keyword:
             return []
 
+        def _search_one(item):
+            path, wrapper = item
+            try:
+                return path, wrapper.name, wrapper.search(keyword, use_variants)
+            except Exception as e:
+                print(f"[搜索] 词典 {wrapper.name} 搜索失败: {e}")
+                return path, wrapper.name, []
+
         merged_results = {}
         seen_pairs: set[tuple[str, int]] = set()
-        for path, wrapper in wrappers:
-            for key, idx in wrapper.search(keyword, use_variants):
+        # 在调用方的后台线程内并行搜索各词典，多词典场景显著加速。
+        # 按提交顺序（即分组配置顺序）收集结果：所有词典已并行搜索，
+        # 此处仅按序等待，总耗时仍取决于最慢的词典；
+        # 这样保证同一词条的 sources 顺序与词条间相对顺序稳定可预期，
+        # 不随各词典完成先后波动。
+        futures = [self._search_executor.submit(_search_one, item) for item in wrappers]
+        for fut in futures:
+            path, name, hits = fut.result()
+            for key, idx in hits:
                 if key not in merged_results:
                     merged_results[key] = {"key": key, "sources": []}
                 pair = (path, idx)
@@ -89,7 +135,7 @@ class DictionaryManager:
                     seen_pairs.add(pair)
                     merged_results[key]["sources"].append({
                         "dict_id": path,
-                        "dict_name": wrapper.name,
+                        "dict_name": name,
                         "idx": idx
                     })
 
