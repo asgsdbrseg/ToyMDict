@@ -534,13 +534,18 @@ class CachedMDX:
         self._build_prefix_sums()
 
     def _build_prefix_sums(self):
-        """根据 _key_blocks_meta 和 _record_blocks_meta 构建前缀和数组"""
+        """根据 _key_blocks_meta 和 _record_blocks_meta 构建前缀和数组，
+        并构建 key block 二分定位所需的排序辅助数组。"""
         self._key_count_prefix = [0]
         for meta in self._key_blocks_meta:
             self._key_count_prefix.append(self._key_count_prefix[-1] + meta["count"])
         self._rec_decomp_prefix = [0]
         for meta in self._record_blocks_meta:
             self._rec_decomp_prefix.append(self._rec_decomp_prefix[-1] + meta["decomp"])
+        # 用于 key block 二分定位：各块首/尾 key 的小写形式（词典 key 有序，故递增）
+        # first 用于精确查找时提前终止，last 用于定位前缀搜索的起始块
+        self._key_first_lower = [m["first"].lower() for m in self._key_blocks_meta]
+        self._key_last_lower = [m["last"].lower() for m in self._key_blocks_meta]
 
     def _build_v3_index(self, m):
         with open(self.fname, 'rb') as f:
@@ -701,7 +706,10 @@ class CachedMDX:
             return block_data
 
     def search_prefix(self, prefix):
-        """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）
+        """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）。
+
+        先用二分定位首个可能命中的 key block（首块之前的块，其尾 key 均小于
+        prefix，不可能包含匹配项），再线性扫描后续块，块首 key 越界即终止。
 
         Args:
             prefix: 搜索前缀
@@ -709,11 +717,15 @@ class CachedMDX:
         results = []
         prefix_lower = prefix.lower()
         prefix_bytes = prefix_lower.encode('utf-8')
-        for idx, meta in enumerate(self._key_blocks_meta):
-            if meta["last"].lower() < prefix_lower:
-                continue
+        metas = self._key_blocks_meta
+        if not metas:
+            return results
+        # 二分：第一个 last.lower() >= prefix_lower 的块（其前的块所有 key 均 < prefix）
+        start = bisect_left(self._key_last_lower, prefix_lower)
+        for idx in range(start, len(metas)):
+            meta = metas[idx]
+            # 块首 key 已大于前缀且不以前缀开头 → 后续块更大，不可能再匹配
             if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
-                # key 已排序，后续 block 的 first 都更大，不可能再匹配
                 break
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]  # O(1) 替代 O(n) 的 sum
@@ -732,6 +744,35 @@ class CachedMDX:
             if stop_outer:
                 break
         return results
+
+    def lookup_key(self, key):
+        """精确查找 key（大小写不敏感），返回绝对索引 idx 或 None。
+
+        先用二分定位候选 key block（含可能匹配的块），再在块内做精确比较。
+        相比 search_prefix 取首条再 != 判等，这里用二分 + 相等比较，
+        更稳健高效，且大小写不敏感与搜索语义一致。
+
+        Args:
+            key: 待查找的词条文本
+        """
+        metas = self._key_blocks_meta
+        if not metas:
+            return None
+        key_lower = key.lower()
+        # 二分：第一个 last.lower() >= key_lower 的块（其前的块所有 key 均 < key）
+        start = bisect_left(self._key_last_lower, key_lower)
+        for idx in range(start, len(metas)):
+            meta = metas[idx]
+            # 块首 key 已大于目标 → 块内有序，后续块更大，不可能相等
+            if meta["first"].lower() > key_lower:
+                break
+            keys_block = self._get_key_block(idx)
+            base_abs_idx = self._key_count_prefix[idx]
+            for local_idx, (rec_offset, key_bytes) in enumerate(keys_block):
+                key_str = key_bytes.decode('utf-8', errors='ignore')
+                if key_str.lower() == key_lower:
+                    return base_abs_idx + local_idx
+        return None
 
     def get_by_index(self, abs_idx):
         with self._file_lock:
