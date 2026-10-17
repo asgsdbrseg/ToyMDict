@@ -171,7 +171,13 @@ class MDict(object):
                 raise ValueError(f"MDX 解压数据校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
         return decompressed_block
 
-    def _decode_key_block_info(self, key_block_info_compressed):
+    def _decode_key_block_info(self, key_block_info_compressed, with_text=False):
+        """解析 key_block_info。
+        - 默认(with_text=False)：返回 [(comp_size, decomp_size), ...]，供 MDict 自身建完整索引；
+        - with_text=True：额外捕获每块的首词/尾词文本字节，返回
+          [(num_entries, head_text, tail_text, comp_size, decomp_size), ...]，
+          供 CachedMDD 只建"块级索引 + 首/尾词"，无需解压任何 key block（与 mdict / PlainDictionaryAPP 对齐）。
+        """
         if self._version >= 2:
             if key_block_info_compressed[:4] != b'\x02\x00\x00\x00':
                 raise ValueError("MDX key block info 魔数不匹配")
@@ -193,19 +199,30 @@ class MDict(object):
         else: byte_format, byte_width, text_term = '>B', 1, 0
 
         while i < len(key_block_info):
-            num_entries += unpack(self._number_format, key_block_info[i:i+self._number_width])[0]
+            block_num = unpack(self._number_format, key_block_info[i:i+self._number_width])[0]
             i += self._number_width
+            num_entries += block_num
+            # ![0] head word text（每块首词）
             text_head_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
             i += byte_width
-            i += (text_head_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            head_w = (text_head_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            head_text = key_block_info[i:i+head_w] if with_text else None
+            i += head_w
+            # ![1] tail word text（每块尾词）
             text_tail_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
             i += byte_width
-            i += (text_tail_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            tail_w = (text_tail_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            tail_text = key_block_info[i:i+tail_w] if with_text else None
+            i += tail_w
             key_block_compressed_size = unpack(self._number_format, key_block_info[i:i+self._number_width])[0]
             i += self._number_width
             key_block_decompressed_size = unpack(self._number_format, key_block_info[i:i+self._number_width])[0]
             i += self._number_width
-            key_block_info_list += [(key_block_compressed_size, key_block_decompressed_size)]
+            if with_text:
+                key_block_info_list.append((block_num, head_text, tail_text,
+                                           key_block_compressed_size, key_block_decompressed_size))
+            else:
+                key_block_info_list += [(key_block_compressed_size, key_block_decompressed_size)]
         return key_block_info_list
 
     def _decode_key_block(self, key_block_compressed, key_block_info_list):
@@ -838,39 +855,12 @@ class CachedMDD:
         self._key_count_prefix = [0]
         self._rec_decomp_prefix = [0]
         self._fh = open(self.fname, 'rb')
-        self._load_or_build_index()           # 只建块级索引（可 JSON 缓存）
+        # 加载时只读 key_block_info 的首/尾词建立块级索引，不落盘、不解压任何 key block
+        self._build_block_index()
+        self._build_prefix_sums()
 
     def _normalize_path(self, path):
         return path.lower().replace('\\', '/').lstrip('/')
-
-    def _get_cache_path(self):
-        return self.fname + ".mdd.cache.json"
-
-    def _load_or_build_index(self):
-        cpath = self._get_cache_path()
-        if os.path.exists(cpath):
-            try:
-                with open(cpath, 'r', encoding='utf-8') as f:
-                    d = json.load(f)
-                if d.get("ver") == CACHE_VERSION and d.get("fsize") == os.path.getsize(self.fname):
-                    self._key_blocks_meta = d["key_meta"]
-                    self._record_blocks_meta = d["rec_meta"]
-                    self._build_prefix_sums()
-                    return
-            except Exception:
-                pass
-        self._build_block_index()
-        try:
-            with open(cpath, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "ver": CACHE_VERSION,
-                    "fsize": os.path.getsize(self.fname),
-                    "key_meta": self._key_blocks_meta,
-                    "rec_meta": self._record_blocks_meta
-                }, f, ensure_ascii=False)
-        except Exception:
-            pass
-        self._build_prefix_sums()
 
     def _build_prefix_sums(self):
         self._key_count_prefix = [0]
@@ -886,7 +876,11 @@ class CachedMDD:
         self._key_last_lower = [self._normalize_path(m["last"]) for m in self._key_blocks_meta]
 
     def _build_block_index(self):
-        """只解析块级索引，不全量解码资源路径（与 CachedMDX 对称）。"""
+        """只读 key_block_info 索引块的【首词/尾词】建立块级索引。
+        不落盘、不读取/不解码任何 key block（与 mdict / PlainDictionaryAPP 对齐）：
+        key_block_info 本身已含每块的首词与尾词文本，二分定位只需要它；
+        命中后由 _get_key_block 按需解压【单块】即可。
+        """
         m = self.base_mdd
         with open(self.fname, 'rb') as f:
             f.seek(m._key_block_offset)
@@ -906,9 +900,10 @@ class CachedMDD:
                 kb_info_size = m._read_number(sf)
                 kb_size = m._read_number(sf)
             kb_info = f.read(kb_info_size)
-            kb_info_list = m._decode_key_block_info(kb_info)
-            kb_data_start = f.tell()
-            kb_compressed = f.read(kb_size)
+            # 读取每块的首词/尾词文本（不再解压 key block 数据）
+            kb_info_list = m._decode_key_block_info(kb_info, with_text=True)
+            kb_data_start = f.tell()               # key block 区起点（用于命中后按需解压单块）
+            f.seek(kb_data_start + kb_size)        # 跳过 key block 区，直接到 record block 区
             num_rb = m._read_number(f)
             m._read_number(f); m._read_number(f); m._read_number(f)
             rec_info_list = []
@@ -921,20 +916,19 @@ class CachedMDD:
                 self._record_blocks_meta.append({"offset": curr, "comp": c, "decomp": d})
                 curr += c
         local_offset = 0
-        for comp, decomp in kb_info_list:
+        for block_num, head_text, tail_text, comp, decomp in kb_info_list:
             if comp == 0:
                 continue
-            kb_data = m._decode_block(kb_compressed[local_offset: local_offset + comp], decomp)
-            keys = m._split_key_block(kb_data)
-            if keys:
-                self._key_blocks_meta.append({
-                    "first": keys[0][1].decode('utf-8', errors='ignore'),
-                    "last": keys[-1][1].decode('utf-8', errors='ignore'),
-                    "count": len(keys),
-                    "offset": kb_data_start + local_offset,
-                    "comp": comp,
-                    "decomp": decomp
-                })
+            first = head_text.decode(m._encoding, errors='ignore').strip('\x00') if head_text else ""
+            last = tail_text.decode(m._encoding, errors='ignore').strip('\x00') if tail_text else ""
+            self._key_blocks_meta.append({
+                "first": first,
+                "last": last,
+                "count": block_num,
+                "offset": kb_data_start + local_offset,
+                "comp": comp,
+                "decomp": decomp
+            })
             local_offset += comp
 
     def _get_key_block(self, idx):
