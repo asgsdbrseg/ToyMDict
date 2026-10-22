@@ -158,6 +158,12 @@ HTML_TEMPLATE = """
         document.addEventListener('click', (e) => { 
             if (!e.target.closest('.menu-container')) document.querySelectorAll('.dropdown').forEach(el => el.classList.remove('show')); 
         }); 
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const openModal = [...document.querySelectorAll('.modal')].find(el => el.style.display === 'flex');
+                if (openModal) closeModals();
+            }
+        });
         function handleSearch(e) {
             if (e.key === 'Enter') {
                 triggerSearch();
