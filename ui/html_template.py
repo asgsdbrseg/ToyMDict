@@ -8,7 +8,7 @@ HTML_TEMPLATE = """
         * { box-sizing: border-box; margin: 0; padding: 0; } 
         body { display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; font-size: 16px; } 
         .toolbar { display: flex; align-items: center; padding: 8px 15px; background: #fff; border-bottom: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.05); z-index: 10; } 
-        .menu-container { position: relative; margin-right: 20px; } 
+        .menu-container { position: relative; margin-right: 16px; } 
         .menu-btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 18px; cursor: pointer; height: 36px; line-height: 1; transition: all 0.2s ease; }
         .menu-btn:hover { background: #45a049; box-shadow: 0 2px 4px rgba(0,0,0,0.15); }
         .menu-btn:active { transform: translateY(1px); }
@@ -16,10 +16,10 @@ HTML_TEMPLATE = """
         .dropdown.show { display: block; }
         .dropdown-item { padding: 10px 15px; cursor: pointer; color: #333; transition: background 0.15s; }
         .dropdown-item:hover { background: #f5f5f5; }
-        .group-selector { margin-right: 20px; display: flex; align-items: center; background: #2196F3; border-radius: 20px; overflow: hidden; height: 36px; border: none; box-shadow: 0 1px 3px rgba(33,150,243,0.2); }
+        .group-selector { margin-right: 16px; display: flex; align-items: center; background: #2196F3; border-radius: 20px; overflow: hidden; height: 36px; border: none; box-shadow: 0 1px 3px rgba(33,150,243,0.2); }
         .group-label { padding: 8px 14px; color: #2196F3; cursor: pointer; background: white; height: 100%; display: flex; align-items: center; justify-content: center; transition: all 0.2s; user-select: none; font-weight: 500; border: 3px solid #2196F3; border-radius: 17px; margin: 1.5px; }
         .group-label:hover { background: #f8f9fa; color: #1976D2; }
-        .group-selector select { padding: 4px 24px 4px 8px; border: none; outline: none; height: 100%; cursor: pointer; background: transparent; color: white; min-width: 70px; appearance: none; text-align: center; text-align-last: center; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 4px center; background-size: 12px; }
+        .group-selector select { border: none; outline: none; height: 100%; cursor: pointer; background: transparent; color: white; width: 90px; text-align: center; }
         .group-selector select option { background: #fff; color: #333; }
         .group-selector:hover { background: #1976D2; box-shadow: 0 2px 6px rgba(33,150,243,0.35); }
         .search-box { flex: 1; display: flex; align-items: center; background: #f5f5f5; border-radius: 20px; padding: 0 12px; border: 1px solid #e0e0e0; transition: all 0.2s ease; }
@@ -29,10 +29,10 @@ HTML_TEMPLATE = """
         .search-btn { padding: 6px 14px; margin-left: 4px; background: linear-gradient(135deg, #4CAF50, #45a049); color: white; border: none; border-radius: 16px; cursor: pointer; font-weight: 500; white-space: nowrap; transition: all 0.2s ease; display: flex; align-items: center; gap: 5px; height: 32px; }
         .search-btn:hover { background: linear-gradient(135deg, #45a049, #3d8b40); box-shadow: 0 2px 6px rgba(76,175,80,0.35); transform: translateY(-1px); }
         .search-btn:active { transform: translateY(0); }
-        .variant-check { display: flex; align-items: center; margin-right: 15px; color: #555; cursor: pointer; white-space: nowrap; } 
+        .variant-check { display: flex; align-items: center; margin-right: 16px; color: #555; cursor: pointer; white-space: nowrap; } 
         .variant-check input { margin-right: 5px; } 
         .main-container { display: flex; flex: 1; overflow: hidden; } 
-        .sidebar { width: 280px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; padding: 10px; } 
+        .sidebar { width: 250px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; padding: 10px; } 
         .content-area { flex: 1; background: #fff; display: flex; flex-direction: column; } 
         .result-item { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 20px; display: flex; justify-content: space-between; align-items: center; } 
         .result-item:hover { background: #f9f9f9; } 
@@ -91,7 +91,7 @@ HTML_TEMPLATE = """
             <select id="groupSelect" onchange="pywebview.api.switch_group(this.value)"></select>
         </div> 
         <label class="variant-check"> 
-            <input type="checkbox" id="variantCheck" checked> 异体字搜索 
+            <input type="checkbox" id="variantCheck" checked> 异体字 
         </label> 
         <div class="search-box">
             <input type="text" id="searchInput" placeholder="请先在上方选择分组，再输入关键词搜索..." onkeyup="handleSearch(event)">
@@ -113,7 +113,7 @@ HTML_TEMPLATE = """
         </div> 
         <div class="group-container"> 
             <div class="group-panel"> 
-                <div class="group-panel-title">全部词典 (双击查看详情)</div> 
+                <div class="group-panel-title">全部词典（双击查看详情）</div> 
                 <div class="dict-filter-box">
                     <input type="text" id="allDictFilter" placeholder="搜索词典名称..." oninput="filterAllDicts(this.value)">
                 </div>
@@ -125,13 +125,13 @@ HTML_TEMPLATE = """
                     <button class="btn-sm" onclick="showAddGroupModal()">新建分组</button> 
                     <button class="btn-sm btn-danger" onclick="deleteCurrentGroup()">删除分组</button> 
                 </div> 
-                <div class="group-panel-title">当前分组词典 (点击 ✕ 移除)</div> 
+                <div class="group-panel-title">当前分组词典（点击 <span class="remove-btn">✕</span> 移除）</div> 
                 <ul id="groupDictsList"></ul> 
             </div> 
         </div> 
     </div> 
     <div id="dictInfoModal" class="modal" style="z-index: 1001;"> 
-        <div class="modal-content" style="min-width: 400px; max-width: 600px; max-height: 80vh; display: flex; flex-direction: column;"> 
+        <div class="modal-content" style="width: 50vw; height: 80vh; display: flex; flex-direction: column;"> 
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;"> 
                 <h3 id="dictInfoTitle" style="margin:0;">词典信息</h3> 
                 <span style="cursor:pointer;font-size:24px;color:#aaa;" onclick="closeDictInfo()">&times;</span> 
@@ -142,7 +142,7 @@ HTML_TEMPLATE = """
     <div class="modal" id="addGroupModal"> 
         <div class="modal-content"> 
             <h3>添加新分组</h3> 
-            <input type="text" id="newGroupName" placeholder="请输入分组名称"> 
+            <input type="text" id="newGroupName" placeholder="请输入分组名称" onkeyup="handleAddGroupKey(event)"> 
             <button class="btn-primary" onclick="confirmAddGroup()">确定</button> 
             <button onclick="closeModals()">取消</button> 
         </div> 
@@ -386,16 +386,32 @@ HTML_TEMPLATE = """
             document.getElementById('addGroupModal').style.display = 'flex'; 
             document.getElementById('newGroupName').focus(); 
         } 
+        function handleAddGroupKey(e) {
+            if (e.key === 'Enter') {
+                confirmAddGroup();
+            }
+        }
         function closeModals() { 
             document.querySelectorAll('.modal').forEach(el => el.style.display = 'none'); 
         } 
         function confirmAddGroup() { 
             const name = document.getElementById('newGroupName').value.trim(); 
-            if(name) { 
-                pywebview.api.add_group(name); 
-                closeModals(); 
-                document.getElementById('newGroupName').value=''; 
-            } 
+            if(!name) {
+                alert('请输入分组名称');
+                document.getElementById('newGroupName').focus();
+                return;
+            }
+            pywebview.api.add_group(name).then(function(result) {
+                if (result && result.ok) {
+                    closeModals();
+                    document.getElementById('newGroupName').value = '';
+                } else if (result && result.error) {
+                    alert(result.error);
+                    const input = document.getElementById('newGroupName');
+                    input.focus();
+                    input.select();
+                }
+            });
         } 
         function deleteCurrentGroup() { 
             if(confirm('确定删除当前分组？')) pywebview.api.delete_group(); 

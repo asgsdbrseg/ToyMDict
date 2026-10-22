@@ -542,12 +542,19 @@ class WindowApi:
             print(f"[DEBUG] init_group_view 错误: {e}")
 
     def add_group(self, name: str):
+        name = (name or "").strip()
+        if not name:
+            return {"ok": False, "error": "分组名称不能为空"}
         with self._config_lock:
             groups = self.config.setdefault("groups", {})
+            if name in groups:
+                return {"ok": False, "error": f"分组已存在：{name}"}
             groups[name] = []
         self._schedule_save_config()
         self._refresh_ui()
         self.init_group_view()
+        return {"ok": True, "name": name}
+
 
     def delete_group(self):
         with self._config_lock:
@@ -693,7 +700,7 @@ class WindowApi:
                 if raw:
                     parts.append("<details style='margin-top:8px;'>"
                                  "<summary style='cursor:pointer;color:#2196F3;font-size:18px;'>全部 Header 字段</summary>"
-                                 "<div style='max-height:200px;overflow:auto;background:#f5f5f5;padding:8px;"
+                                 "<div style='overflow:auto;background:#f5f5f5;padding:8px;"
                                  "border-radius:4px;font-size:16px;margin-top:6px;'>")
                     for k, v in raw.items():
                         shown = v if len(v) <= 300 else v[:300] + "..."
