@@ -49,6 +49,7 @@ def main():
         hotkey = GlobalHotkeyService(window, enabled=True)
         hotkey.start()
 
+        webview.settings['ALLOW_DOWNLOADS'] = True
         webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
         webview.start(debug=True)
     finally:
