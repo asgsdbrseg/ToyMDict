@@ -434,6 +434,10 @@ HTML_TEMPLATE = """
                 var use_variants = document.getElementById('variantCheck').checked;
                 pywebview.api.search(data.word, use_variants);
             }
+             // 处理图片双击：在系统默认图片查看器中打开
+             else if (data.type === 'open-image' && data.url) {
+                pywebview.api.open_image(data.url, data.dictId, data.relPath);
+             }
         }); 
    </script> 
 </body> 
