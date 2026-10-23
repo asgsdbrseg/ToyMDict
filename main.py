@@ -43,6 +43,7 @@ def main():
             api.reload_excluded_dict,
             api.get_dict_info,
             api.move_dict,
+            api.open_image,
         )
 
         # 全局快捷键：双击 Ctrl 将选中的文字发送到搜索框（默认常开，不可关闭）
