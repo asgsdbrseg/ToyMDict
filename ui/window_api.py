@@ -5,13 +5,8 @@ import os
 import atexit
 import traceback
 import html as html_module
-import tempfile
-import base64
-import sys
-from urllib.parse import unquote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.path_helper import safe_url_encode, get_app_base_dir
-from utils.resource_resolver import MdxResourceResolver
 from utils.html_link_rewriter import rewrite_html_links
 import time
 from services import storage
@@ -500,35 +495,21 @@ class WindowApi:
         </script>
         '''
 
-        # 双击图片：把图片完整 URL + 词典 id + 相对资源路径发给父窗口，
-        # 父窗口优先走进程内取字节（与资源服务器同一代码路径，免去一次 HTTP 回源）。
+        # 双击图片：把图片完整 URL 发给父窗口，由其主窗口浮层显示（方案A）
         image_cursor_style = '<style>img{cursor:zoom-in;}</style>'
-        # 把构建时已知的 dict_id 直接注入 iframe，避免事后从 URL 反解（Linux 下 URL 含双斜杠、dict_id 解析为空）
-        image_dict_id_script = f'<script>window.__TOYMDICT_DICT_ID={json.dumps(dict_id, ensure_ascii=False)};</script>'
-        image_script = image_dict_id_script + '''
+        image_script = '''
         <script>
         (function() {
             function getImgSrc(img) {
-                try { return img.currentSrc || img.src || ''; } catch (e) { return img.src || ''; }
-            }
+                 try { return img.currentSrc || img.src || ''; } catch (e) { return img.src || ''; }
+             }
             document.addEventListener('dblclick', function(e) {
-                var img = e && e.target && e.target.closest ? e.target.closest('img') : null;
-                if (!img) return;
-                var src = getImgSrc(img);
-                if (!src) return;
-                // 由 base href 推算相对资源路径（即词典内的资源路径）
-                var base = document.baseURI || '';
-                var relPath = '';
-                if (base && src.indexOf(base) === 0) {
-                    relPath = src.substring(base.length);
-                }
-                window.parent.postMessage({
-                    type: 'open-image',
-                    url: src,
-                    dictId: window.__TOYMDICT_DICT_ID || '',
-                    relPath: relPath || ''
-                }, '*');
-            }, true);
+                 var img = e && e.target && e.target.closest ? e.target.closest('img') : null;
+                 if (!img) return;
+                 var src = getImgSrc(img);
+                 if (!src) return;
+                window.parent.postMessage({ type: 'open-image', url: src }, '*');
+             }, true);
         })();
         </script>
         '''
@@ -756,138 +737,3 @@ class WindowApi:
                 f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
 
         _submit_task(task)
-
-    # ==================== 图片查看 ====================
-    def open_image(self, url: str, dict_id: str = "", rel_path: str = ""):
-        """双击图片时在系统默认图片查看器中打开。
-
-        优先进程内取字节：复用与本地资源服务器完全相同的
-        MdxResourceResolver.resolve_resource 路径，直接从已加载的词典
-        （内存/磁盘）取字节，避免一次本地 HTTP 回源；词典内资源取不到时
-        （如外链 http(s) 图、data: URI、file://）再回退到 HTTP / 直读。
-        """
-        if not url and not rel_path:
-            return
-        data = None
-        # 进程内直接取字节（与资源服务器同一代码路径，免去一次 HTTP 回源）
-        if dict_id and rel_path:
-            try:
-                data = MdxResourceResolver.resolve_resource(self.manager, dict_id, rel_path)
-            except Exception as e:
-                print(f"[图片] 进程内取字节失败，回退 HTTP: {e}")
-                data = None
-        # 兜底：外部图片 / data: / file: 等无法走进程内解析的资源
-        if not data:
-            data = self._fetch_image_bytes(url)
-        if not data:
-            print(f"[图片] 获取图片字节失败: {url}")
-            return
-        try:
-            ext = self._guess_image_ext(url, data)
-            fd, tmp_path = tempfile.mkstemp(prefix="toymdict_img_", suffix=ext)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(data)
-            except Exception:
-                try:
-                    os.close(fd)
-                except Exception:
-                    pass
-                raise
-            self._open_in_system_viewer(tmp_path)
-        except Exception as e:
-            print(f"[图片] 打开图片失败: {e}")
-
-    def _fetch_image_bytes(self, url: str):
-        """根据图片 URL 取得原始字节（支持 http(s)、data:、file:）。"""
-        try:
-            low = url.lower()
-            if low.startswith("data:"):
-                return self._decode_data_uri(url)
-            if low.startswith("file://"):
-                path = url[7:]
-                if path.startswith("//"):
-                    path = path[1:]
-                path = unquote(path)
-                with open(path, "rb") as f:
-                    return f.read()
-            # 默认按本地资源服务的 HTTP 链接处理
-            return self._http_get(url)
-        except Exception as e:
-            print(f"[图片] 获取字节异常: {e}")
-            return None
-
-    @staticmethod
-    def _decode_data_uri(url: str):
-        """解析 data: URI 的 base64 / 文本载荷。"""
-        try:
-            comma = url.find(",")
-            if comma == -1:
-                return None
-            meta = url[5:comma]
-            payload = url[comma + 1:]
-            if ";base64" in meta.lower():
-                return base64.b64decode(payload)
-            from urllib.parse import unquote as _uq
-            return _uq(payload).encode("utf-8", "replace")
-        except Exception as e:
-            print(f"[图片] 解析 data URI 失败: {e}")
-            return None
-
-    @staticmethod
-    def _http_get(url: str):
-        """通过 HTTP 获取图片字节，路径含非 ASCII 字符时自动重新编码。"""
-        import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "ToyMDict"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                return resp.read()
-        except UnicodeEncodeError:
-            from urllib.parse import urlparse, quote
-            p = urlparse(url)
-            safe_path = quote(unquote(p.path, encoding="utf-8", errors="replace"),
-                              safe="/:")
-            new_url = f"{p.scheme}://{p.netloc}{safe_path}"
-            if p.query:
-                new_url += "?" + p.query
-            req2 = urllib.request.Request(new_url, headers={"User-Agent": "ToyMDict"})
-            with urllib.request.urlopen(req2, timeout=10) as resp:
-                return resp.read()
-
-    @staticmethod
-    def _guess_image_ext(url: str, data: bytes):
-        """根据 URL 扩展名或文件头嗅探图片后缀。"""
-        path = url.split("?")[0].split("#")[0]
-        dot = path.rfind(".")
-        if dot != -1:
-            ext = path[dot:].lower()
-            if 1 < len(ext) <= 5:
-                return ext
-        # 文件头嗅探
-        sig = data[:8]
-        if sig[:4] == b"\x89PNG":
-            return ".png"
-        if sig[:3] == b"\xff\xd8\xff":
-            return ".jpg"
-        if sig[:4] == b"GIF8":
-            return ".gif"
-        if sig[:2] == b"BM":
-            return ".bmp"
-        if sig[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return ".webp"
-        if sig[:2] in (b"II", b"MM"):
-            return ".tiff"
-        if sig[:5] == b"%PDF-":
-            return ".pdf"
-        return ".img"
-
-    @staticmethod
-    def _open_in_system_viewer(path: str):
-        """调用系统默认程序打开给定文件（跨平台）。"""
-        import subprocess
-        if sys.platform == "win32":
-            os.startfile(path)
-        elif sys.platform == "darwin":
-            subprocess.run(["open", path], check=False)
-        else:
-            subprocess.run(["xdg-open", path], check=False)

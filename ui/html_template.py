@@ -434,12 +434,97 @@ HTML_TEMPLATE = """
                 var use_variants = document.getElementById('variantCheck').checked;
                 pywebview.api.search(data.word, use_variants);
             }
-             // 处理图片双击：在系统默认图片查看器中打开
-             else if (data.type === 'open-image' && data.url) {
-                pywebview.api.open_image(data.url, data.dictId, data.relPath);
-             }
+            // 处理图片双击：在应用内 webview 浮层中打开（支持缩放/平移）
+            else if (data.type === 'open-image' && data.url) {
+                if (typeof showImageOverlay === 'function') showImageOverlay(data.url);
+            }
         }); 
    </script> 
+      <!-- 图片预览浮层（方案A：在 webview 内打开，支持缩放/平移） -->
+   <div id="imageOverlay" class="img-overlay">
+       <div class="img-overlay-toolbar">
+           <button type="button" class="img-btn" data-act="zoom-out" title="缩小">&#8722;</button>
+           <span id="imgZoomLabel" class="img-zoom-label">100%</span>
+           <button type="button" class="img-btn" data-act="zoom-in" title="放大">&#43;</button>
+           <button type="button" class="img-btn" data-act="reset" title="重置(适配视图)">1:1</button>
+           <button type="button" class="img-btn" data-act="close" title="关闭 (Esc)">&#10005;</button>
+       </div>
+       <img id="imageOverlayImg" class="img-overlay-img" alt="" draggable="false" />
+       <div class="img-overlay-hint">滚轮缩放 &middot; 拖拽平移 &middot; 双击复位 &middot; Esc/点击空白关闭</div>
+   </div>
+   <style>
+       .img-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 2000; display: none; align-items: center; justify-content: center; overflow: hidden; }
+       .img-overlay.show { display: flex; }
+       .img-overlay-toolbar { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.14); padding: 6px 10px; border-radius: 24px; z-index: 2001; }
+       .img-btn { width: 34px; height: 34px; border: none; border-radius: 50%; background: rgba(255,255,255,0.2); color: #fff; font-size: 18px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s; }
+       .img-btn:hover { background: rgba(255,255,255,0.34); }
+       .img-zoom-label { color: #fff; min-width: 48px; text-align: center; font-size: 14px; user-select: none; }
+       .img-overlay-img { max-width: 100%; max-height: 100%; transform-origin: center center; cursor: grab; user-select: none; -webkit-user-drag: none; }
+       .img-overlay-img.grabbing { cursor: grabbing; }
+       .img-overlay-hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); color: rgba(255,255,255,0.6); font-size: 13px; pointer-events: none; }
+   </style>
+   <script>
+   (function() {
+       var overlay = document.getElementById('imageOverlay');
+       var img = document.getElementById('imageOverlayImg');
+       var zoomLabel = document.getElementById('imgZoomLabel');
+       overlay.setAttribute('tabindex', '-1');
+       var scale = 1, posX = 0, posY = 0, dragging = false, startX = 0, startY = 0;
+
+       function applyTransform() {
+           img.style.transform = 'translate(' + posX + 'px,' + posY + 'px) scale(' + scale + ')';
+           zoomLabel.textContent = Math.round(scale * 100) + '%';
+       }
+       window.showImageOverlay = function(url) {
+           if (!url) return;
+           img.src = url;
+           overlay.classList.add('show');
+           overlay.focus();
+           scale = 1; posX = 0; posY = 0; applyTransform();
+       };
+       function closeOverlay() {
+           overlay.classList.remove('show');
+           img.src = '';
+           scale = 1; posX = 0; posY = 0;
+       }
+       function zoomBy(factor) {
+           scale = Math.max(0.1, Math.min(scale * factor, 10));
+           applyTransform();
+       }
+       overlay.querySelector('.img-overlay-toolbar').addEventListener('click', function(e) {
+           var act = e.target.getAttribute('data-act');
+           if (!act) return;
+           if (act === 'zoom-in') zoomBy(1.2);
+           else if (act === 'zoom-out') zoomBy(1/1.2);
+           else if (act === 'reset') { scale = 1; posX = 0; posY = 0; applyTransform(); }
+           else if (act === 'close') closeOverlay();
+       });
+       overlay.addEventListener('wheel', function(e) {
+           e.preventDefault();
+           zoomBy(e.deltaY < 0 ? 1.1 : 1/1.1);
+       }, { passive: false });
+       img.addEventListener('mousedown', function(e) {
+           dragging = true; startX = e.clientX - posX; startY = e.clientY - posY;
+           img.classList.add('grabbing');
+       });
+       window.addEventListener('mousemove', function(e) {
+           if (!dragging) return;
+           posX = e.clientX - startX; posY = e.clientY - startY; applyTransform();
+       });
+       window.addEventListener('mouseup', function() {
+           if (dragging) { dragging = false; img.classList.remove('grabbing'); }
+       });
+       img.addEventListener('dblclick', function(e) {
+           e.stopPropagation(); scale = 1; posX = 0; posY = 0; applyTransform();
+       });
+       overlay.addEventListener('click', function(e) {
+           if (e.target === overlay) closeOverlay();
+       });
+       window.addEventListener('keydown', function(e) {
+           if (e.key === 'Escape' && overlay.classList.contains('show')) closeOverlay();
+       });
+   })();
+   </script>
 </body> 
 </html>
 """
