@@ -41,6 +41,12 @@ class GlobalHotkeyService:
         self._pyperclip = None
         self._available = False
 
+        # 窗口状态跟踪：区分「最小化」与「最大化」，避免 restore() 把最大化窗口还原成普通大小
+        self._state_lock = threading.Lock()
+        self._window_minimized = False
+        self._window_maximized = False
+        self._state_events_bound = False
+
     # ==================== 生命周期 ====================
     def start(self):
         """启动全局键盘监听。依赖缺失或不支持时打印警告并禁用。"""
@@ -64,6 +70,7 @@ class GlobalHotkeyService:
         self._listener.daemon = True
         self._listener.start()
         self._available = True
+        self._bind_window_state_events()
         print("[全局快捷键] 已启动：双击 Ctrl 取词（将选中文字发送到搜索框）")
 
     def stop(self):
@@ -197,10 +204,120 @@ class GlobalHotkeyService:
             with self._lock:
                 self._running = False
 
+    # ==================== 窗口状态跟踪 ====================
+    def _bind_window_state_events(self):
+        """注册 pywebview 窗口状态事件，实时跟踪最小化/最大化状态。
+
+        pywebview 的 window.restore() 在 Qt / WinForms 后端会把窗口状态置为
+        「普通」（Qt: setWindowState(WindowNoState)，WinForms: WindowState=Normal），
+        这会把已最大化的窗口还原成普通大小。因此必须先区分当前是「最小化」还是
+        「最大化」，仅在真正最小化时才调用 restore()。
+        """
+        if self._state_events_bound:
+            return
+        try:
+            events = getattr(self.window, "events", None)
+            if events is None:
+                return
+
+            def _on_minimized():
+                with self._state_lock:
+                    self._window_minimized = True
+                    self._window_maximized = False
+
+            def _on_maximized():
+                with self._state_lock:
+                    self._window_maximized = True
+                    self._window_minimized = False
+
+            def _on_restored():
+                with self._state_lock:
+                    self._window_minimized = False
+                    self._window_maximized = False
+
+            # pywebview 事件支持 += 注册回调，状态变化时会在独立线程回调
+            events.minimized += _on_minimized
+            events.maximized += _on_maximized
+            events.restored += _on_restored
+            self._state_events_bound = True
+        except Exception as e:
+            print(f"[全局快捷键] 绑定窗口状态事件失败: {e}")
+
+    def _is_window_minimized(self):
+        """判断窗口是否处于最小化状态。
+
+        优先使用事件跟踪的状态；若事件未绑定或不可靠，则回退到通过原生窗口
+        对象直接查询（跨平台）。
+        """
+        if not self._state_events_bound:
+            return self._query_native_minimized()
+        with self._state_lock:
+            return self._window_minimized
+
+    def _query_native_minimized(self):
+        """通过原生窗口对象跨平台查询最小化状态（事件未绑定时的回退方案）。"""
+        native = getattr(self.window, "native", None)
+        if native is None:
+            return False
+        try:
+            # Qt：QWidget.isMinimized()
+            if hasattr(native, "isMinimized"):
+                return bool(native.isMinimized())
+            # Cocoa：NSWindow.isMiniaturized
+            if hasattr(native, "isMiniaturized"):
+                return bool(native.isMiniaturized)
+            # WinForms：Form.WindowState == Minimized(2)
+            state = getattr(native, "WindowState", None)
+            if state is not None:
+                return int(state) == 2
+            # GTK：Gdk.WindowState.ICONIFIED(2)
+            get_state = getattr(native, "get_state", None)
+            if callable(get_state):
+                return bool(get_state() & 2)
+        except Exception:
+            pass
+        return False
+
     def _bring_to_front(self):
-        """把主窗口恢复到前台（最小化/后台时也可生效）。"""
-        for fn in ("restore", "show"):
+        """把主窗口带到前台。
+
+        关键修复：仅当窗口真正处于「最小化」状态时才调用 restore()。
+        否则（正常/最大化）restore() 会把最大化窗口还原成普通大小，
+        导致取词后窗口尺寸被意外改变。
+        """
+        if self._is_window_minimized():
+            # 最小化：restore() 会取消最小化并置顶
             try:
-                getattr(self.window, fn)()
+                self.window.restore()
             except Exception:
                 pass
+        else:
+            # 非最小化（正常或最大化）：仅 show 并置顶，避免破坏最大化状态
+            try:
+                self.window.show()
+            except Exception:
+                pass
+            self._raise_native_window()
+
+    def _raise_native_window(self):
+        """将非最小化窗口置顶并激活（不改变窗口状态）。
+
+        pywebview 的 show() 在 Qt 后端仅调用 QWidget.show()，对已可见窗口
+        不会置顶，因此需要直接调用原生方法。为线程安全起见，仅做最佳努力。
+        """
+        native = getattr(self.window, "native", None)
+        if native is None:
+            return
+        try:
+            # Qt：raise_() + activateWindow() 置顶并激活
+            if hasattr(native, "raise_") and hasattr(native, "activateWindow"):
+                native.raise_()
+                native.activateWindow()
+                return
+            # WinForms：Activate + BringToFront
+            if hasattr(native, "Activate"):
+                native.Activate()
+            if hasattr(native, "BringToFront"):
+                native.BringToFront()
+        except Exception:
+            pass
