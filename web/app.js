@@ -505,9 +505,9 @@ function openAdvancedSearch() {
     }
     pywebview.api.get_advanced_search_dicts().then(function (dicts) {
         _advState.dicts = dicts || [];
-        // 默认全选；切换分组后新出现的词典也默认勾选，已有勾选状态保留
+        // 默认全不选；切换分组后新出现的词典也默认不勾选，已有勾选状态保留
         _advState.dicts.forEach(function (d) {
-            if (!(d.id in _advState.selected)) _advState.selected[d.id] = true;
+            if (!(d.id in _advState.selected)) _advState.selected[d.id] = false;
         });
         renderAdvDicts();
         updateAdvSelectedCount();
