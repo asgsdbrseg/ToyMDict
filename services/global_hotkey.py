@@ -18,7 +18,11 @@ import sys
 import time
 import threading
 import json
-import traceback
+import logging
+
+from utils import error_reporter
+
+logger = logging.getLogger(__name__)
 
 
 class GlobalHotkeyService:
@@ -47,14 +51,19 @@ class GlobalHotkeyService:
         try:
             from pynput import keyboard
             from pynput.keyboard import Key, Controller, Listener
-        except Exception as e:
-            print(f"[全局快捷键] 未安装 pynput，双击Ctrl取词功能已禁用: {e}")
+        except Exception as exc:
+            logger.warning("未安装 pynput，双击 Ctrl 取词功能已禁用: %s", exc)
+            error_reporter.report(
+                "取词功能不可用",
+                "缺少 pynput，双击 Ctrl 取词已禁用，请安装 requirements.txt 中的依赖",
+                level="warning", exc=exc,
+            )
             return
 
         try:
             import pyperclip
-        except Exception as e:
-            print(f"[全局快捷键] 未安装 pyperclip，取词功能将不可用: {e}")
+        except Exception as exc:
+            logger.warning("未安装 pyperclip，取词功能将不可用: %s", exc)
             pyperclip = None
 
         self._Key = Key
@@ -64,7 +73,7 @@ class GlobalHotkeyService:
         self._listener.daemon = True
         self._listener.start()
         self._available = True
-        print("[全局快捷键] 已启动：双击 Ctrl 取词（将选中文字发送到搜索框）")
+        logger.info("已启动：双击 Ctrl 取词（将选中文字发送到搜索框）")
 
     def stop(self):
         """停止监听并释放资源。"""
@@ -156,8 +165,9 @@ class GlobalHotkeyService:
             with self._kb_controller.pressed(copy_mod):
                 self._kb_controller.press("c")
                 self._kb_controller.release("c")
-        except Exception as e:
-            print(f"[全局快捷键] 模拟复制失败: {e}")
+        except Exception as exc:
+            logger.warning("模拟复制失败: %s", exc)
+            error_reporter.report("取词失败", "模拟复制按键时出错", level="warning", exc=exc)
         finally:
             self._capturing = False
         # 等待目标应用把内容写入剪贴板
@@ -189,10 +199,12 @@ class GlobalHotkeyService:
             try:
                 js = "externalSearch(%s)" % json.dumps(text, ensure_ascii=False)
                 self.window.evaluate_js(js)
-            except Exception as e:
-                print(f"[全局快捷键] 写入搜索框失败: {e}")
-        except Exception:
-            traceback.print_exc()
+            except Exception as exc:
+                logger.warning("写入搜索框失败: %s", exc)
+                error_reporter.report("取词失败", "搜索框写入失败", level="warning", exc=exc)
+        except Exception as exc:
+            logger.exception("取词流程异常")
+            error_reporter.report("取词失败", str(exc), level="warning", exc=exc)
         finally:
             with self._lock:
                 self._running = False

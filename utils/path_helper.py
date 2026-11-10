@@ -1,14 +1,25 @@
 # -*- coding: utf-8 -*-
+import mimetypes
 import os
 import sys
-from urllib.parse import quote, unquote
+from urllib.parse import quote
+
 
 def safe_url_encode(path: str) -> str:
-    """处理特殊字符图片路径，防止双重编码"""
-    if not path: return ""
-    # 防止原本就是 %xx 格式被二次编码，先解码一次还原
-    decoded_path = unquote(path)
-    return quote(decoded_path)
+    """把词典路径 / 词条文本编码为 URL 片段。
+
+    ``quote`` 默认 ``safe='/'``，不会编码正斜杠；而 POSIX 绝对路径必然含
+    ``/``，会破坏 ``/mdd/{dict_id}/{path}`` 的单次分段解析（dict_id 被切成
+    空串，资源全部 404）。这里显式 ``safe=''`` 把斜杠一并编码，由服务端
+    ``unquote`` **一次**还原。
+
+    不再预先 ``unquote``：输入一律是调用方持有的原始明文，预解码会破坏
+    文件名中真实存在的 ``%xx`` 字面量，也违背「单次解码」约定。
+    """
+    if not path:
+        return ""
+    return quote(path, safe="")
+
 
 def get_mime_type(filename: str) -> str:
     ext = os.path.splitext(filename)[1].lower()
@@ -30,39 +41,46 @@ def get_mime_type(filename: str) -> str:
         '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac',
         '.mp4': 'video/mp4', '.webm': 'video/webm', '.avi': 'video/x-msvideo',
     }
-    return mime_map.get(ext, 'application/octet-stream')
+    return mime_map.get(ext) or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+
 
 def find_mdx_files(folder_path: str) -> list:
-    """递归遍历文件夹获取所有 mdx 文件"""
+    """递归遍历文件夹获取所有 mdx 文件（排序保证导入顺序稳定）"""
     mdx_files = []
     if not os.path.exists(folder_path):
         return mdx_files
     for root, dirs, files in os.walk(folder_path):
-        for f in files:
+        dirs.sort()
+        for f in sorted(files):
             if f.lower().endswith('.mdx'):
                 mdx_files.append(os.path.join(root, f))
     return mdx_files
+
 
 def get_app_base_dir() -> str:
     """获取应用基础目录（开发时为项目根目录，打包后为 exe 所在目录）"""
     if getattr(sys, 'frozen', False):
         # PyInstaller 打包后：exe 所在目录
         return os.path.dirname(sys.executable)
-    else:
-        # 开发环境：向上两级（从 utils/ → 根目录）
-        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    
+    # 开发环境：向上两级（从 utils/ → 根目录）
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def get_web_dir() -> str:
+    """前端静态资源目录（前后端分离后由 ResourceServer 提供 /static/）。"""
+    return os.path.join(get_app_base_dir(), "web")
+
+
 def normalize_resource_path(path: str) -> str:
-    """统一的资源路径规范化
-    
-    将路径转换为小写、正斜杠、去前导/
-    例如：\\css\\STYLE.CSS -> css/style.css
+    """资源路径规范化：小写、正斜杠、去前导 ``/``。
+
+    **不做 URL 解码**：解码统一由 ``MdxResourceResolver.decode_request``
+    完成一次，避免 resolve_resource → check_path_safety 的双重 unquote。
+    例如：``\\css\\STYLE.CSS`` -> ``css/style.css``
     """
-    from urllib.parse import unquote
-    path = unquote(path or "")
-    path = path.replace("\\", "/")
-    path = path.lstrip("/")
+    path = (path or "").replace("\\", "/").lstrip("/")
     return path.lower()
+
 
 def resolve_case_insensitive(base_dir: str, rel_path: str):
     """在 base_dir 下按大小写不敏感匹配 rel_path（支持多级目录与 \\ / 混用）。

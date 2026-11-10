@@ -1,531 +1,68 @@
-HTML_TEMPLATE = """
-<!DOCTYPE html> 
-<html lang="zh-CN"> 
-<head> 
-    <meta charset="UTF-8"> 
-    <style id="custom-framework-css"></style>
-    <style> 
-        * { box-sizing: border-box; margin: 0; padding: 0; } 
-        body { display: flex; flex-direction: column; height: 100vh; background: #f0f2f5; font-size: 16px; } 
-        .toolbar { display: flex; align-items: center; padding: 8px 15px; background: #fff; border-bottom: 1px solid #ddd; box-shadow: 0 2px 4px rgba(0,0,0,0.05); z-index: 10; } 
-        .menu-container { position: relative; margin-right: 16px; } 
-        .menu-btn { padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 18px; cursor: pointer; height: 36px; line-height: 1; transition: all 0.2s ease; }
-        .menu-btn:hover { background: #45a049; box-shadow: 0 2px 4px rgba(0,0,0,0.15); }
-        .menu-btn:active { transform: translateY(1px); }
-        .dropdown { display: none; position: absolute; top: 100%; left: 0; background: white; border: 1px solid #ddd; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.12); min-width: 150px; z-index: 100; margin-top: 4px; }
-        .dropdown.show { display: block; }
-        .dropdown-item { padding: 10px 15px; cursor: pointer; color: #333; transition: background 0.15s; }
-        .dropdown-item:hover { background: #f5f5f5; }
-        .group-selector { margin-right: 16px; display: flex; align-items: center; background: #2196F3; border-radius: 20px; overflow: hidden; height: 36px; border: none; box-shadow: 0 1px 3px rgba(33,150,243,0.2); }
-        .group-label { padding: 8px 14px; color: #2196F3; cursor: pointer; background: white; height: 100%; display: flex; align-items: center; justify-content: center; transition: all 0.2s; user-select: none; font-weight: 500; border: 3px solid #2196F3; border-radius: 17px; margin: 1.5px; }
-        .group-label:hover { background: #f8f9fa; color: #1976D2; }
-        .group-selector select { border: none; outline: none; height: 100%; cursor: pointer; background: transparent; color: white; width: 90px; text-align: center; }
-        .group-selector select option { background: #fff; color: #333; }
-        .group-selector:hover { background: #1976D2; box-shadow: 0 2px 6px rgba(33,150,243,0.35); }
-        .search-box { flex: 1; display: flex; align-items: center; background: #f5f5f5; border-radius: 20px; padding: 0 12px; border: 1px solid #e0e0e0; transition: all 0.2s ease; }
-        .search-box:hover, .search-box:focus-within { background: #fff; border-color: #4CAF50; box-shadow: 0 0 0 3px rgba(76,175,80,0.1); }
-        .search-box input { flex: 1; border: none; background: transparent; padding: 10px 8px; outline: none; color: #333; }
-        .search-box input::placeholder { color: #999; }
-        .search-btn { padding: 6px 14px; margin-left: 4px; background: linear-gradient(135deg, #4CAF50, #45a049); color: white; border: none; border-radius: 16px; cursor: pointer; font-weight: 500; white-space: nowrap; transition: all 0.2s ease; display: flex; align-items: center; gap: 5px; height: 32px; }
-        .search-btn:hover { background: linear-gradient(135deg, #45a049, #3d8b40); box-shadow: 0 2px 6px rgba(76,175,80,0.35); transform: translateY(-1px); }
-        .search-btn:active { transform: translateY(0); }
-        .variant-check { display: flex; align-items: center; margin-right: 16px; color: #555; cursor: pointer; white-space: nowrap; } 
-        .variant-check input { margin-right: 5px; } 
-        .main-container { display: flex; flex: 1; overflow: hidden; } 
-        .sidebar { width: 250px; background: #fff; border-right: 1px solid #ddd; overflow-y: auto; padding: 10px; } 
-        .content-area { flex: 1; background: #fff; display: flex; flex-direction: column; } 
-        .result-item { padding: 8px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer; font-size: 20px; display: flex; justify-content: space-between; align-items: center; } 
-        .result-item:hover { background: #f9f9f9; } 
-        .result-item.active { background: #e8f0fe; color: #1a73e8; } 
-        .result-meta { color: #888; white-space: nowrap; margin-left: 10px;} 
-        iframe { flex: 1; border: none; width: 100%; } 
-        .modal { display: none; position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; } 
-        .modal-content { background: white; padding: 20px; border-radius: 8px; min-width: 300px; } 
-        .modal input { width: 100%; padding: 8px; margin: 10px 0; border: 1px solid #ccc; border-radius: 4px; } 
-        .modal button { margin-right: 10px; padding: 6px 15px; border: none; border-radius: 4px; cursor: pointer; } 
-        .btn-primary { background: #4CAF50; color: white; } 
-        .btn-danger { background: #f44336; color: white; } 
-        .group-view { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #fff; z-index: 1000; display: none; flex-direction: column; } 
-        .group-header { display: flex; align-items: center; padding: 15px 20px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; } 
-        .group-header h3 { margin-left: 20px; color: #333; } 
-        .btn-back { background: #6c757d; color: white; border: none; border-radius: 4px; padding: 8px 15px; cursor: pointer; } 
-        .btn-back:hover { background: #5a6268; } 
-        .group-container { display: flex; flex: 1; overflow: hidden; } 
-        .group-panel { width: 50%; display: flex; flex-direction: column; border-right: 1px solid #dee2e6; } 
-        .group-panel:last-child { border-right: none; } 
-        .group-panel-title { padding: 12px 15px; font-weight: bold; background: #f1f3f5; border-bottom: 1px solid #dee2e6; color: #495057; } 
-        .dict-filter-box { padding: 8px 12px; border-bottom: 1px solid #dee2e6; background: #fafafa; } 
-        .dict-filter-box input { width: 100%; padding: 7px 10px; border: 1px solid #ced4da; border-radius: 4px; outline: none; font-size: 16px; } 
-        .dict-filter-box input:focus { border-color: #2196F3; box-shadow: 0 0 0 2px rgba(33,150,243,0.15); } 
-        .group-controls { padding: 15px; display: flex; gap: 10px; border-bottom: 1px solid #dee2e6; background: #fafafa; align-items: center; } 
-        .form-control { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; outline: none; } 
-        .btn-sm { padding: 6px 12px; border: 1px solid #ced4da; border-radius: 4px; background: #fff; cursor: pointer; } 
-        .btn-danger { background: #f44336; color: white; } 
-        #allDictsList, #groupDictsList { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex: 1; } 
-        #allDictsList li, #groupDictsList li { padding: 10px 15px; border-bottom: 1px solid #f1f1f1; cursor: default; display: flex; justify-content: space-between; align-items: center; } 
-        #allDictsList li:hover, #groupDictsList li:hover { background: #e9ecef; } 
-        .btn-group { display: flex; gap: 4px; align-items: center; } 
-        .action-btn { cursor: pointer; padding: 2px 6px; border-radius: 3px; user-select: none; font-family: sans-serif; } 
-        .add-btn { color: #28a745; font-weight: bold; font-size: 20px; line-height: 1; } 
-        .add-btn:hover { background: #e6f4ea; } 
-        .sort-btn { color: #5f6368; background: #f1f3f4; border-radius: 4px; } 
-        .sort-btn:hover { background: #e8eaed; } 
-        .remove-btn { color: #dc3545; font-weight: bold; cursor: pointer; padding: 0 5px; } 
-        .remove-btn:hover { color: #a71d2a; } 
-        .dict-excluded span:first-child { color: #999; font-style: italic; } 
-        .dict-summary {font-size: 20px; background: #d3d3d3;}
-        #searchInput {font-size: 20px;}
-    </style> 
-</head> 
-<body> 
-    <div class="toolbar"> 
-        <div class="menu-container"> 
-            <button class="menu-btn" onclick="toggleMenu('fileMenu')">打开词典 ▼</button> 
-            <div id="fileMenu" class="dropdown"> 
-                <div class="dropdown-item" onclick="pywebview.api.open_file()">打开文件</div> 
-                <div class="dropdown-item" onclick="pywebview.api.open_folder()">打开文件夹</div> 
-            </div> 
-        </div> 
-        <div class="group-selector">
-            <span class="group-label" onclick="showGroupView()">词典分组</span>
-            <select id="groupSelect" onchange="pywebview.api.switch_group(this.value)"></select>
-        </div> 
-        <label class="variant-check"> 
-            <input type="checkbox" id="variantCheck" checked> 异体字 
-        </label> 
-        <div class="search-box">
-            <input type="text" id="searchInput" placeholder="请先在上方选择分组，再输入关键词搜索..." onkeyup="handleSearch(event)">
-            <button class="search-btn" onclick="triggerSearch()" title="搜索">🔍</button>
-        </div>
-    </div> 
-    <div class="main-container"> 
-        <div class="sidebar"> 
-            <div id="resultList"></div> 
-        </div> 
-        <div class="content-area"> 
-            <div id="contentArea" style="flex:1; overflow-y: auto; background: #fff; padding: 10px; scrollbar-gutter: stable;"></div> 
-        </div> 
-    </div> 
-    <div id="groupView" class="group-view"> 
-        <div class="group-header"> 
-            <button class="btn-back" onclick="showMainView()">← 返回主界面</button> 
-            <h3>词典分组管理</h3> 
-        </div> 
-        <div class="group-container"> 
-            <div class="group-panel"> 
-                <div class="group-panel-title">全部词典（双击查看详情）</div> 
-                <div class="dict-filter-box">
-                    <input type="text" id="allDictFilter" placeholder="搜索词典名称..." oninput="filterAllDicts(this.value)">
-                </div>
-                <ul id="allDictsList"></ul> 
-            </div> 
-            <div class="group-panel"> 
-                <div class="group-controls"> 
-                    <select id="groupSelectGroupView" class="form-control" onchange="pywebview.api.switch_group(this.value)"></select> 
-                    <button class="btn-sm" onclick="showAddGroupModal()">新建分组</button> 
-                    <button class="btn-sm btn-danger" onclick="deleteCurrentGroup()">删除分组</button> 
-                </div> 
-                <div class="group-panel-title">当前分组词典（点击 <span class="remove-btn">✕</span> 移除）</div> 
-                <ul id="groupDictsList"></ul> 
-            </div> 
-        </div> 
-    </div> 
-    <div id="dictInfoModal" class="modal" style="z-index: 1001;"> 
-        <div class="modal-content" style="width: 50vw; height: 80vh; display: flex; flex-direction: column;"> 
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;"> 
-                <h3 id="dictInfoTitle" style="margin:0;">词典信息</h3> 
-                <span style="cursor:pointer;font-size:24px;color:#aaa;" onclick="closeDictInfo()">&times;</span> 
-            </div> 
-            <div id="dictInfoBody" style="line-height:1.6; font-size:18px; overflow-y: auto;"></div> 
-        </div> 
-    </div> 
-    <div class="modal" id="addGroupModal"> 
-        <div class="modal-content"> 
-            <h3>添加新分组</h3> 
-            <input type="text" id="newGroupName" placeholder="请输入分组名称" onkeyup="handleAddGroupKey(event)"> 
-            <button class="btn-primary" onclick="confirmAddGroup()">确定</button> 
-            <button onclick="closeModals()">取消</button> 
-        </div> 
-    </div> 
-    <script> 
-        let currentDictId = null; 
-        function toggleMenu(id) { 
-            document.querySelectorAll('.dropdown').forEach(el => { 
-                if(el.id !== id) el.classList.remove('show'); 
-            }); 
-            document.getElementById(id).classList.toggle('show'); 
-        } 
-        document.addEventListener('click', (e) => { 
-            if (!e.target.closest('.menu-container')) document.querySelectorAll('.dropdown').forEach(el => el.classList.remove('show')); 
-        }); 
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                const openModal = [...document.querySelectorAll('.modal')].find(el => el.style.display === 'flex');
-                if (openModal) closeModals();
-            }
-        });
-        function handleSearch(e) {
-            if (e.key === 'Enter') {
-                triggerSearch();
-            }
-        }
-        function triggerSearch() {
-            const keyword = document.getElementById('searchInput').value.trim();
-            const use_variants = document.getElementById('variantCheck').checked;
-            if(keyword) pywebview.api.search(keyword, use_variants);
-        }
-        function externalSearch(keyword) {
-            keyword = (keyword || '').trim();
-            if (!keyword) return;
-            var input = document.getElementById('searchInput');
-            if (input) input.value = keyword;
-            triggerSearch();
-        }
-        function updateUI(data) {
-            const optHtml = data.groups.map(g => {
-                const name = escapeHtml(g.name);
-                return `<option value="${name}"${g.name === data.current ? 'selected' : ''}>${name}</option>`;
-            }).join('');
-            document.getElementById('groupSelect').innerHTML = optHtml;
-            document.getElementById('groupSelectGroupView').innerHTML = optHtml;
-        }
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-        function updateResults(results) {
-            document.getElementById('resultList').innerHTML = results.map((r, i) => {
-                const count = r.sources.length;
-                return `<div class="result-item" onclick="showEntry(${i})">
-                    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.key)}</span>
-                    <span class="result-meta">${count}</span>
-                </div>`;
-            }).join('');
-        }
-        function setContent(dictDataArray) {
-            const container = document.getElementById('contentArea');
-            container.innerHTML = '';
+# -*- coding: utf-8 -*-
+"""主窗口 HTML 模板加载器（前后端分离）。
 
-            // 消息处理器按 iframe id 查找目标，是幂等的，只需注册一次
-            if (!window._iframeMsgHandler) {
-                window._iframeMsgHandler = function(event) {
-                    if (event.data && event.data.type === 'resize') {
-                        const iframe = document.getElementById(event.data.id);
-                        if (iframe) {
-                            var newH = event.data.height;
-                            // 子端已做 rAF 节流 + 同高去重，这里仅在高度变化时写样式
-                            if (parseInt(iframe.style.height) !== newH) {
-                                iframe.style.height = newH + 'px';
-                            }
-                        }
-                    }
-                };
-                window.addEventListener('message', window._iframeMsgHandler);
-            }
-
-            dictDataArray.forEach((item, index) => {
-                const details = document.createElement('details');
-                details.className = 'dict-block';
-                if (index === 0) details.open = true;
-
-                const summary = document.createElement('summary');
-                summary.className = 'dict-summary';
-                summary.innerText = '📖 ' + item.dict_name;
-                details.appendChild(summary);
-
-                const iframeWrapper = document.createElement('div');
-                iframeWrapper.style.cssText = 'padding: 0; margin: 0;';
-
-                const iframe = document.createElement('iframe');
-                const iframeId = 'dict-iframe-' + index;
-                iframe.id = iframeId;
-                iframe.style.cssText = 'width: 100%; border: none; height: 0px; overflow: hidden !important;';
-                iframe.setAttribute('frameborder', '0');
-                iframe.setAttribute('scrolling', 'no');
-                // iframe 直连本地 resource server 的 /entry/ 路由，
-                // 不再经 pywebview bridge 传输整包 HTML（srcdoc）
-                iframe.src = item.url;
-
-                iframeWrapper.appendChild(iframe);
-                details.appendChild(iframeWrapper);
-
-                details.addEventListener('toggle', function() {
-                    if (details.open) {
-                        setTimeout(function() {
-                            try { iframe.contentWindow.postMessage('calcHeight', '*'); } catch(e) {}
-                        }, 100);
-                    }
-                });
-
-                container.appendChild(details);
-            });
-        }
-        function showEntry(index) { 
-            const items = document.querySelectorAll('.result-item');
-            // 越界保护：结果列表刚更新、index 失配时避免 undefined.classList 崩溃
-            if (index < 0 || index >= items.length) return;
-            items.forEach(el => el.classList.remove('active')); 
-            items[index].classList.add('active'); 
-            pywebview.api.show_entry(index); 
-        } 
-        function showGroupView() { 
-            document.getElementById('groupView').style.display = 'flex'; 
-            pywebview.api.init_group_view(); 
-        } 
-        function showMainView() { 
-            document.getElementById('groupView').style.display = 'none'; 
-        } 
-        function renderGroupView(allDicts, groups, currentGroup) {
-            // === 修复：确保分组下拉框正确渲染，并对名称转义 ===
-            const optHtml = groups.map(g => {
-                const name = escapeHtml(g.name);
-                return `<option value="${name}"${g.name === currentGroup ? 'selected' : ''}>${name}</option>`;
-            }).join('');
-            document.getElementById('groupSelect').innerHTML = optHtml;
-            document.getElementById('groupSelectGroupView').innerHTML = optHtml;
-            const currentGroupData = groups.find(g => g.name === currentGroup);
-            
-            // ===== 渲染左侧：全部词典 ===== 
-            const allList = document.getElementById('allDictsList'); 
-            allList.innerHTML = ''; 
-            allDicts.forEach(d => { 
-                if (d.status === 'active') return; 
-                const li = document.createElement('li'); 
-                if (d.status === 'excluded') li.className = 'dict-excluded'; 
-                
-                const span = document.createElement('span'); 
-                span.innerText = d.name; 
-                span.style.flex = '1'; 
-                span.ondblclick = () => pywebview.api.get_dict_info(d.id); 
-                
-                const btnGroup = document.createElement('div'); 
-                btnGroup.className = 'btn-group'; 
-                
-                if (d.status === 'excluded') { 
-                    const btn = document.createElement('span'); 
-                    btn.innerText = '↻'; 
-                    btn.className = 'action-btn sort-btn'; 
-                    btn.title = '恢复并重新加载'; 
-                    btn.onclick = (e) => { e.stopPropagation(); pywebview.api.reload_excluded_dict(d.id); }; 
-                    btnGroup.appendChild(btn); 
-                } else { 
-                    const btn1 = document.createElement('span'); 
-                    btn1.innerText = '✕'; 
-                    btn1.className = 'action-btn remove-btn'; 
-                    btn1.title = '排除并卸载'; 
-                    btn1.style.marginRight = '6px'; 
-                    btn1.onclick = (e) => { e.stopPropagation(); pywebview.api.exclude_dict(d.id); }; 
-                    btnGroup.appendChild(btn1); 
-                    
-                    const btn2 = document.createElement('span'); 
-                    btn2.innerText = '+'; 
-                    btn2.className = 'action-btn add-btn'; 
-                    btn2.title = '添加至分组'; 
-                    btn2.onclick = (e) => { e.stopPropagation(); pywebview.api.add_dict_to_group(d.id); }; 
-                    btnGroup.appendChild(btn2); 
-                } 
-                
-                li.appendChild(span); 
-                li.appendChild(btnGroup); 
-                allList.appendChild(li); 
-            }); 
-            
-            // 渲染后应用当前过滤条件
-            const filterInput = document.getElementById('allDictFilter');
-            if (filterInput) filterAllDicts(filterInput.value);
-            
-            // ===== 渲染右侧：当前分组词典 ===== 
-            const groupList = document.getElementById('groupDictsList'); 
-            groupList.innerHTML = ''; 
-            if (currentGroupData) { 
-                currentGroupData.dicts.forEach(d => { 
-                    const li = document.createElement('li'); 
-                    const span = document.createElement('span'); 
-                    span.innerText = d.name; 
-                    span.style.flex = '1'; 
-                    span.ondblclick = () => pywebview.api.get_dict_info(d.id); 
-                    
-                    const btnGroup = document.createElement('div'); 
-                    btnGroup.className = 'btn-group'; 
-                    [{text:'⤒',action:'top',title:'置顶'},{text:'↑',action:'up',title:'上移'},{text:'↓',action:'down',title:'下移'},{text:'⤓',action:'bottom',title:'置底'}].forEach(a => { 
-                        const btn = document.createElement('span'); 
-                        btn.innerText = a.text; 
-                        btn.title = a.title; 
-                        btn.className = 'action-btn sort-btn'; 
-                        btn.onclick = (e) => { e.stopPropagation(); pywebview.api.move_dict(d.id, a.action); }; 
-                        btnGroup.appendChild(btn); 
-                    }); 
-                    
-                    const removeBtn = document.createElement('span'); 
-                    removeBtn.innerText = '✕'; 
-                    removeBtn.className = 'remove-btn'; 
-                    removeBtn.title = '从分组移除'; 
-                    removeBtn.onclick = (e) => { e.stopPropagation(); pywebview.api.remove_dict_from_group(d.id); }; 
-                    btnGroup.appendChild(removeBtn); 
-                    
-                    li.appendChild(span); 
-                    li.appendChild(btnGroup); 
-                    groupList.appendChild(li); 
-                }); 
-            } 
-        } 
-        function filterAllDicts(keyword) { 
-            const kw = (keyword || '').trim().toLowerCase(); 
-            const list = document.getElementById('allDictsList'); 
-            if (!list) return; 
-            const items = list.getElementsByTagName('li'); 
-            for (let i = 0; i < items.length; i++) { 
-                const span = items[i].querySelector('span'); 
-                const name = span ? span.innerText.toLowerCase() : ''; 
-                items[i].style.display = (!kw || name.includes(kw)) ? '' : 'none'; 
-            } 
-        } 
-        function showDictInfoModal(title, body) { 
-            document.getElementById('dictInfoTitle').innerText = title; 
-            document.getElementById('dictInfoBody').innerHTML = body; 
-            document.getElementById('dictInfoModal').style.display = 'flex'; 
-        } 
-        function closeDictInfo() { 
-            document.getElementById('dictInfoModal').style.display = 'none'; 
-        } 
-        function showAddGroupModal() { 
-            document.getElementById('addGroupModal').style.display = 'flex'; 
-            document.getElementById('newGroupName').focus(); 
-        } 
-        function handleAddGroupKey(e) {
-            if (e.key === 'Enter') {
-                confirmAddGroup();
-            }
-        }
-        function closeModals() { 
-            document.querySelectorAll('.modal').forEach(el => el.style.display = 'none'); 
-        } 
-        function confirmAddGroup() { 
-            const name = document.getElementById('newGroupName').value.trim(); 
-            if(!name) {
-                alert('请输入分组名称');
-                document.getElementById('newGroupName').focus();
-                return;
-            }
-            pywebview.api.add_group(name).then(function(result) {
-                if (result && result.ok) {
-                    closeModals();
-                    document.getElementById('newGroupName').value = '';
-                } else if (result && result.error) {
-                    alert(result.error);
-                    const input = document.getElementById('newGroupName');
-                    input.focus();
-                    input.select();
-                }
-            });
-        } 
-        function deleteCurrentGroup() { 
-            if(confirm('确定删除当前分组？')) pywebview.api.delete_group(); 
-        } 
-        window.addEventListener('message', function(event) {
-            var data = event.data || {};
-            
-            // 处理 entry:// 跳转：收到词条后，填入搜索框并触发搜索
-            if (data.type === 'entry-link' && data.word) {
-                var input = document.getElementById('searchInput');
-                input.value = data.word;
-                input.focus();
-                // 复用现有的搜索逻辑
-                var use_variants = document.getElementById('variantCheck').checked;
-                pywebview.api.search(data.word, use_variants);
-            }
-            // 处理图片双击：在应用内 webview 浮层中打开（支持缩放/平移）
-            else if (data.type === 'open-image' && data.url) {
-                if (typeof showImageOverlay === 'function') showImageOverlay(data.url);
-            }
-        }); 
-   </script> 
-      <!-- 图片预览浮层（方案A：在 webview 内打开，支持缩放/平移） -->
-   <div id="imageOverlay" class="img-overlay">
-       <div class="img-overlay-toolbar">
-           <button type="button" class="img-btn" data-act="zoom-out" title="缩小">&#8722;</button>
-           <span id="imgZoomLabel" class="img-zoom-label">100%</span>
-           <button type="button" class="img-btn" data-act="zoom-in" title="放大">&#43;</button>
-           <button type="button" class="img-btn" data-act="reset" title="重置(适配视图)">1:1</button>
-           <button type="button" class="img-btn" data-act="close" title="关闭 (Esc)">&#10005;</button>
-       </div>
-       <img id="imageOverlayImg" class="img-overlay-img" alt="" draggable="false" />
-       <div class="img-overlay-hint">滚轮缩放 &middot; 拖拽平移 &middot; 双击复位 &middot; Esc/点击空白关闭</div>
-   </div>
-   <style>
-       .img-overlay { position: fixed; inset: 0; background: rgba(233,233,233,1); z-index: 2000; display: none; align-items: center; justify-content: center; overflow: hidden; }
-       .img-overlay.show { display: flex; }
-       .img-overlay-toolbar { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: white; padding: 6px 10px; border-radius: 24px; z-index: 2001; }
-       .img-btn { width: 34px; height: 34px; border: none; border-radius: 50%; font-size: 18px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s; }
-       .img-zoom-label { min-width: 48px; text-align: center; font-size: 14px; user-select: none; }
-       .img-overlay-img { max-width: 100%; max-height: 100%; transform-origin: center center; cursor: grab; user-select: none; -webkit-user-drag: none; }
-       .img-overlay-img.grabbing { cursor: grabbing; }
-       .img-overlay-hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 16px; pointer-events: none; background: white; }
-   </style>
-   <script>
-   (function() {
-       var overlay = document.getElementById('imageOverlay');
-       var img = document.getElementById('imageOverlayImg');
-       var zoomLabel = document.getElementById('imgZoomLabel');
-       overlay.setAttribute('tabindex', '-1');
-       var scale = 1, posX = 0, posY = 0, dragging = false, startX = 0, startY = 0;
-
-       function applyTransform() {
-           img.style.transform = 'translate(' + posX + 'px,' + posY + 'px) scale(' + scale + ')';
-           zoomLabel.textContent = Math.round(scale * 100) + '%';
-       }
-       window.showImageOverlay = function(url) {
-           if (!url) return;
-           img.src = url;
-           overlay.classList.add('show');
-           overlay.focus();
-           scale = 1; posX = 0; posY = 0; applyTransform();
-       };
-        function closeOverlay() {
-            overlay.classList.remove('show');
-            // 置空 src 会把当前页面 URL 赋给 img 并触发多余请求，用 removeAttribute
-            img.removeAttribute('src');
-            scale = 1; posX = 0; posY = 0;
-        }
-       function zoomBy(factor) {
-           scale = Math.max(0.1, Math.min(scale * factor, 10));
-           applyTransform();
-       }
-       overlay.querySelector('.img-overlay-toolbar').addEventListener('click', function(e) {
-           var act = e.target.getAttribute('data-act');
-           if (!act) return;
-           if (act === 'zoom-in') zoomBy(1.2);
-           else if (act === 'zoom-out') zoomBy(1/1.2);
-           else if (act === 'reset') { scale = 1; posX = 0; posY = 0; applyTransform(); }
-           else if (act === 'close') closeOverlay();
-       });
-       overlay.addEventListener('wheel', function(e) {
-           e.preventDefault();
-           zoomBy(e.deltaY < 0 ? 1.1 : 1/1.1);
-       }, { passive: false });
-       img.addEventListener('mousedown', function(e) {
-           dragging = true; startX = e.clientX - posX; startY = e.clientY - posY;
-           img.classList.add('grabbing');
-       });
-       window.addEventListener('mousemove', function(e) {
-           if (!dragging) return;
-           posX = e.clientX - startX; posY = e.clientY - startY; applyTransform();
-       });
-       window.addEventListener('mouseup', function() {
-           if (dragging) { dragging = false; img.classList.remove('grabbing'); }
-       });
-       img.addEventListener('dblclick', function(e) {
-           e.stopPropagation(); scale = 1; posX = 0; posY = 0; applyTransform();
-       });
-       overlay.addEventListener('click', function(e) {
-           if (e.target === overlay) closeOverlay();
-       });
-       window.addEventListener('keydown', function(e) {
-           if (e.key === 'Escape' && overlay.classList.contains('show')) closeOverlay();
-       });
-   })();
-   </script>
-</body> 
-</html>
+原先 530 行 HTML/CSS/JS 内嵌在这个 Python 文件的三引号字符串中，前端无法
+独立 lint / 调试。现在页面本体位于 ``web/index.html``，样式与脚本分别位于
+``web/style.css`` / ``web/app.js``，由 ResourceServer 的 ``/static/`` 路由
+提供；本模块只负责把运行期才知道的端口注入模板。
 """
+import logging
+import os
+
+from utils import error_reporter
+from utils.path_helper import get_app_base_dir, get_web_dir
+
+logger = logging.getLogger(__name__)
+
+_FALLBACK_HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>ToyMDict</title></head><body style="font-family:sans-serif;padding:32px;color:#c00;">
+<h2>前端资源缺失</h2><p>未找到 web/index.html，请确认安装完整或重新打包。详见 toymdict.log。</p>
+<script>function showError(t,m){var d=document.createElement('pre');d.textContent=(t||'')+'\\n'+(m||'');document.body.appendChild(d);}</script>
+</body></html>"""
+
+
+def _read_web(name: str) -> str:
+    with open(os.path.join(get_web_dir(), name), "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def load_index_html(port: int, inline: bool = False) -> str:
+    """读取 web/index.html 并注入静态资源基址与 origin。
+
+    ``inline=True`` 时把主窗口的 CSS/JS 内联进 HTML（源码仍保持分离），
+    用于个别 webview 后端``load_html`` 不允许加载 http 子资源的环境，
+    通过环境变量 ``TOYMDICT_INLINE_FRONTEND=1`` 开启。词条 iframe 本身
+    就是 http 页面，始终走静态资源，不受影响。
+    """
+    origin = f"http://localhost:{port}"
+    try:
+        html = _read_web("index.html")
+    except Exception as exc:
+        path = os.path.join(get_web_dir(), "index.html")
+        logger.exception("加载前端模板失败: %s", path)
+        error_reporter.report("前端资源缺失", f"未找到 {path}", exc=exc)
+        return _FALLBACK_HTML
+
+    html = (html
+            .replace("__STATIC_BASE__", origin + "/static")
+            .replace("__ORIGIN__", origin))
+    if not inline:
+        return html
+
+    try:
+        custom_css = ""
+        custom_path = os.path.join(get_app_base_dir(), "custom.css")
+        if os.path.isfile(custom_path):
+            with open(custom_path, "r", encoding="utf-8") as f:
+                custom_css = f.read()
+        return (html
+                .replace(f'<link rel="stylesheet" href="{origin}/static/style.css">',
+                         "<style>\n" + _read_web("style.css") + "\n</style>")
+                .replace(f'<link rel="stylesheet" href="{origin}/static/custom.css">',
+                         "<style>\n" + custom_css + "\n</style>")
+                .replace(f'<script src="{origin}/static/app.js"></script>',
+                         "<script>\n" + _read_web("app.js") + "\n</script>"))
+    except Exception as exc:
+        logger.exception("内联前端资源失败，回退到静态资源模式")
+        error_reporter.report("前端资源加载失败", str(exc), level="warning", exc=exc)
+        return html

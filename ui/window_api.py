@@ -1,178 +1,28 @@
 # -*- coding: utf-8 -*-
-import threading
-import json
-import os
-import copy
+"""pywebview 暴露给前端的 API 层。
+
+前后端分离后，本模块不再包含任何 HTML/CSS/JS 字符串：主窗口页面由
+``web/index.html`` 提供，词条 iframe 的脚本由 ``/static/entry.js`` 提供。
+"""
 import atexit
-import traceback
+import copy
 import html as html_module
+import json
+import logging
+import os
+import threading
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from utils.path_helper import safe_url_encode, get_app_base_dir
-from utils.html_link_rewriter import rewrite_html_links
+
 from services import storage
-from utils.daemon_executor import DaemonThreadPoolExecutor
+from utils import error_reporter
+from utils.executors import submit_task
+from utils.html_link_rewriter import HtmlRewriteError, rewrite_html_links
+from utils.path_helper import safe_url_encode
 
+logger = logging.getLogger(__name__)
 
-_TASK_EXECUTOR = DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="window-api")
-_LOAD_EXECUTOR = DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="load-entry")
-
-
-def _report_future_error(future):
-    """Future 异常回调：保持与原 threading.Thread 同等的错误可见性。"""
-    try:
-        future.result()
-    except Exception:
-        traceback.print_exc()
-
-
-def _submit_task(fn, *args, **kwargs):
-    """提交后台任务到模块级线程池，异常时打印堆栈。"""
-    future = _TASK_EXECUTOR.submit(fn, *args, **kwargs)
-    future.add_done_callback(_report_future_error)
-    return future
-
-
-@atexit.register
-def _shutdown_executors():
-    _TASK_EXECUTOR.shutdown(wait=False)
-    _LOAD_EXECUTOR.shutdown(wait=False)
-
-
-# ==================== 词条 iframe 注入脚本（模块级常量，避免每词条重建字符串） ====================
-
-# iframe 高度自适应：ResizeObserver 覆盖图片/字体/details 等一切尺寸变化，
-# rAF 节流 + 同高去重；保留 calcHeight 消息作为父端主动请求通道。
-# "__IFRAME_ID__" 为占位符，由 _build_complete_html 替换。
-_RESIZE_SCRIPT_TEMPLATE = '''<script>(function() {
-    var id = "__IFRAME_ID__";
-    var last = -1, raf = 0;
-    function measure() {
-        raf = 0;
-        var d = document.getElementById('mdx-content');
-        if (!d) return;
-        var h = d.offsetHeight;
-        if (h === last) return;          // 同高去重，避免重复 postMessage
-        last = h;
-        window.parent.postMessage({type:'resize',id:id,height:h},'*');
-    }
-    function schedule() {                // rAF 节流：一帧最多量一次
-        if (!raf) raf = requestAnimationFrame(measure);
-    }
-    var d = document.getElementById('mdx-content');
-    if (window.ResizeObserver && d) {
-        new ResizeObserver(schedule).observe(d);   // 覆盖图片/字体/details 等一切尺寸变化
-    } else {
-        window.addEventListener("load", schedule); // 兜底（老内核）
-    }
-    window.addEventListener("message", function(e) {
-        if (e.data === 'calcHeight') schedule();   // 保留父端主动请求（兼容 details 展开）
-    });
-})();</script>'''
-
-# 音频播放与词条内链接处理（entry:// 跳转、sound:// 发音、内联 new Audio()）。
-# 完全静态，无需按词条定制。
-_ENTRY_SCRIPT = '''
-        <script>
-        (function() {
-            var currentAudio = null;
-
-            // 从 onclick 属性中提取音频 URL（兼容 new Audio('url') / "url" / `url` 及反引号包裹的情况）
-            function extractAudioUrl(onclick) {
-                if (!onclick) return null;
-                // 用反向引用匹配同种引号闭合，URL 内容允许包含反引号（紧凑样式表遗留）
-                var m = onclick.match(/new\\s+Audio\\(\\s*(['"`])(.*?)\\1\\s*\\)/);
-                if (!m) return null;
-                var url = m[2].trim();
-                // 去除 MDX 紧凑样式表遗留的反引号包裹
-                url = url.replace(/^`+|`+$/g, '');
-                return url || null;
-            }
-
-            function playAudio(url) {
-                if (!url) return;
-                try {
-                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-                    currentAudio = new Audio(url);
-                    currentAudio.play().catch(function(err) {
-                        console.error("音频播放失败:", err, "URL:", url);
-                    });
-                } catch (err) {
-                    console.error("音频播放异常:", err);
-                }
-            }
-
-            // 解码 URI 分量；畸形 % 序列（损坏词典中真实存在）返回原文而非抛异常，
-            // 避免中断捕获阶段的 click handler 导致该词条所有链接失效
-            function safeDecode(s) {
-                try { return decodeURIComponent(s); } catch (e) { return s; }
-            }
-
-            document.addEventListener('click', function(e) {
-                var a = e && e.target && e.target.closest('a');
-                if (!a) return;
-
-                var href = (a.getAttribute('href') || '').trim();
-
-                // 最高优先级：HTML 重写阶段识别出的音频链接（外部/本地音频文件）
-                var dataAudioUrl = a.getAttribute('data-audio-url');
-                if (dataAudioUrl) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    playAudio(dataAudioUrl);
-                    return;
-                }
-
-                // 处理内联 onclick 中通过 new Audio() 播放语音的情况（如在线发音）
-                var onclick = a.getAttribute('onclick') || '';
-                var audioUrl = extractAudioUrl(onclick);
-                if (audioUrl) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    playAudio(audioUrl);
-                    return;
-                }
-
-                if (href.toLowerCase().startsWith('entry://')) {
-                    e.preventDefault(); e.stopPropagation();
-                    var word = safeDecode(href.substring(8));
-                    if (word.indexOf('#') !== -1) { word = word.split('#')[0]; }
-                    if (word) { window.parent.postMessage({ type: 'entry-link', word: word }, '*'); }
-                }
-                else if (href.toLowerCase().startsWith('sound://')) {
-                    e.preventDefault(); e.stopPropagation();
-                    var soundPath = safeDecode(href.substring(8));
-                    if (soundPath.startsWith('/')) { soundPath = soundPath.substring(1); }
-                    var baseUrl = document.baseURI;
-                    var soundUrl = baseUrl + soundPath;
-                    playAudio(soundUrl);
-                }
-                else if (!href) {
-                    // 无 href 的 <a>：阻止可能的默认跳转行为
-                    e.preventDefault();
-                }
-            }, true);
-        })();
-        </script>
-        '''
-
-# 双击图片：把图片完整 URL 发给父窗口，由其主窗口浮层显示（方案A）。完全静态。
-_IMAGE_SCRIPT = '''
-        <script>
-        (function() {
-            function getImgSrc(img) {
-                 try { return img.currentSrc || img.src || ''; } catch (e) { return img.src || ''; }
-             }
-            document.addEventListener('dblclick', function(e) {
-                 var img = e && e.target && e.target.closest ? e.target.closest('img') : null;
-                 if (!img) return;
-                 var src = getImgSrc(img);
-                 if (!src) return;
-                window.parent.postMessage({ type: 'open-image', url: src }, '*');
-             }, true);
-        })();
-        </script>
-        '''
+# 词典路径失效的统一提示口径：界面与弹窗都不再出现含糊的「未知词典」。
+INVALID_DICT_TITLE = "词典路径已失效"
 
 
 class WindowApi:
@@ -182,22 +32,23 @@ class WindowApi:
         self.server = resource_server
         self._current_results = []
         self._results_lock = threading.Lock()
-        self._config_lock = threading.RLock()  # 新增：保护 self.config
+        self._search_seq = 0               # 用于丢弃过期搜索结果
+        self._config_lock = threading.RLock()
         self.config = {}
-        self._init_system()
+
+        # 定时器必须先于 _init_system 初始化：其后台任务可能触发延迟保存
         self._save_timer = None
+        self._save_timer_lock = threading.Lock()
         self._save_delay = 0.5
-        # atexit 兜底：进程退出时立即落盘，避免丢失延迟窗口内的配置改动
         atexit.register(self._flush_config)
 
-        self._custom_css = ""
-        self._load_custom_css()
-        # 词条 HTML 缓存（iframe 直连 /entry/ 路由用）：
-        # key=(dict_id, key, idx, css_stamp)，value=含 __IFRAME_ID__ 占位符的完整 HTML；
-        # ifid 每次请求时才替换，避免结果顺序变化导致缓存失效
+        # 词条 HTML 缓存（iframe 直连 /entry/ 路由用）
+        # key=(dict_id, key, idx)，value=含 __IFRAME_ID__ 占位符的完整 HTML
         self._entry_cache = OrderedDict()
         self._entry_cache_lock = threading.Lock()
         self._ENTRY_CACHE_MAX = 32
+
+        self._init_system()
 
     def _get_config(self, key, default=None):
         with self._config_lock:
@@ -211,8 +62,9 @@ class WindowApi:
     def _load_config(self):
         try:
             self.config = storage.load_config()
-        except Exception as e:
-            print(f"[DEBUG] 加载配置失败: {e}")
+        except Exception as exc:  # storage 内部已兜底，这里再防一层
+            logger.exception("加载配置失败")
+            error_reporter.report("配置读取失败", str(exc), exc=exc)
             self.config = {}
         self.config.setdefault("all_dicts", [])
         self.config.setdefault("groups", {})
@@ -221,19 +73,21 @@ class WindowApi:
         self._config_loaded = True
 
     def _schedule_save_config(self):
-        """延迟保存配置，避免频繁文件写入"""
-        if self._save_timer:
-            self._save_timer.cancel()
-        self._save_timer = threading.Timer(self._save_delay, self._save_config_now)
-        self._save_timer.daemon = True
-        self._save_timer.start()
+        """延迟保存配置（加锁避免并发创建多个 Timer）。"""
+        with self._save_timer_lock:
+            if self._save_timer:
+                self._save_timer.cancel()
+            self._save_timer = threading.Timer(self._save_delay, self._save_config_now)
+            self._save_timer.daemon = True
+            self._save_timer.start()
 
     def _flush_config(self):
-        """atexit 兜底：取消延迟保存定时器并立即落盘，避免程序退出时
-        丢失最近一次（0.5s 延迟窗口内）的配置改动。"""
-        if self._save_timer:
-            self._save_timer.cancel()
+        """atexit 兜底：取消延迟保存并立即落盘。"""
+        with self._save_timer_lock:
+            timer = self._save_timer
             self._save_timer = None
+        if timer:
+            timer.cancel()
         if getattr(self, "_config_loaded", False):
             self._save_config_now()
 
@@ -241,69 +95,35 @@ class WindowApi:
         with self._config_lock:
             if not isinstance(self.config.get("excluded"), list):
                 self.config["excluded"] = []
-            config_snapshot = copy.deepcopy(self.config)  # 深拷贝避免迭代时被并发修改
+            config_snapshot = copy.deepcopy(self.config)
         storage.save_config(config_snapshot)
-
-    # ==================== 自定义 CSS ====================
-
-    def _load_custom_css(self):
-        base_dir = get_app_base_dir()
-        custom_css_path = os.path.join(base_dir, "custom.css")
-        if not os.path.exists(custom_css_path):
-            print(f"[CSS] 未找到自定义样式文件: {custom_css_path}")
-            return
-        
-        with open(custom_css_path, 'r', encoding='utf8') as f:
-            self._custom_css = f.read()
-        print(f"[CSS] 已加载自定义样式: {custom_css_path} ")
-
-    def _inject_custom_css_to_framework(self):
-        """将自定义 CSS 注入主框架页面"""
-        if not self._custom_css:
-            return
-        try:
-            escaped_css = json.dumps(self._custom_css, ensure_ascii=False)
-            js_code = f"""
-                (function() {{
-                    var el = document.getElementById('custom-framework-css');
-                    if (el) {{
-                        el.textContent = {escaped_css};
-                    }}
-                }})();
-            """
-            self.window.evaluate_js(js_code)
-        except Exception as e:
-            print(f"[CSS] 注入框架CSS失败: {e}")
 
     # ==================== 无效路径清理 ====================
     def _cleanup_invalid_paths(self, invalid_paths: set):
-        """从 all_dicts 和所有分组中删除无效路径"""
+        """从 all_dicts / 所有分组 / excluded 中删除无效路径。"""
         modified = False
         with self._config_lock:
-            # 从 all_dicts 中删除
             if "all_dicts" in self.config:
                 original_count = len(self.config["all_dicts"])
                 self.config["all_dicts"] = [
                     d for d in self.config["all_dicts"]
-                    if os.path.abspath(d["id"]) not in invalid_paths
+                    if os.path.abspath(d.get("id", "")) not in invalid_paths
                 ]
                 if len(self.config["all_dicts"]) < original_count:
                     modified = True
-                    print(f"[清理] 从 all_dicts 删除 {original_count - len(self.config['all_dicts'])} 个无效路径")
+                    logger.info("从 all_dicts 删除 %d 个无效路径",
+                                original_count - len(self.config["all_dicts"]))
 
-            # 从 groups 中删除（所有分组，不仅是当前分组）
-            if "groups" in self.config:
-                for group_name, paths in self.config["groups"].items():
-                    original_count = len(paths)
-                    self.config["groups"][group_name] = [
-                        p for p in paths
-                        if os.path.abspath(p) not in invalid_paths
-                    ]
-                    if len(self.config["groups"][group_name]) < original_count:
-                        modified = True
-                        print(f"[清理] 从 groups['{group_name}'] 删除 {original_count - len(self.config['groups'][group_name])} 个无效路径")
+            for group_name, paths in self.config.get("groups", {}).items():
+                original_count = len(paths)
+                self.config["groups"][group_name] = [
+                    p for p in paths if os.path.abspath(p) not in invalid_paths
+                ]
+                if len(self.config["groups"][group_name]) < original_count:
+                    modified = True
+                    logger.info("从 groups['%s'] 删除 %d 个无效路径",
+                                group_name, original_count - len(self.config["groups"][group_name]))
 
-            # 从 excluded 中删除
             if "excluded" in self.config:
                 original_count = len(self.config["excluded"])
                 self.config["excluded"] = [
@@ -312,15 +132,72 @@ class WindowApi:
                 ]
                 if len(self.config["excluded"]) < original_count:
                     modified = True
-                    print(f"[清理] 从 excluded 删除 {original_count - len(self.config['excluded'])} 个无效路径")
+                    logger.info("从 excluded 删除 %d 个无效路径",
+                                original_count - len(self.config["excluded"]))
 
         if modified:
             self._schedule_save_config()
+
+    # ==================== 失效词典清理 ====================
+    @staticmethod
+    def _is_valid_dict_path(path) -> bool:
+        """词典文件真实存在才算有效；目录、失效挂载点一律视为失效。"""
+        try:
+            return bool(path) and os.path.isfile(path)
+        except OSError:
+            return False
+
+    def _collect_invalid_paths(self) -> set:
+        """扫描配置中出现的全部词典路径，返回其中已失效的绝对路径集合。"""
+        with self._config_lock:
+            candidates = set()
+            for d in self.config.get("all_dicts", []):
+                if isinstance(d, dict) and isinstance(d.get("id"), str) and d["id"]:
+                    candidates.add(os.path.abspath(d["id"]))
+            for paths in self.config.get("groups", {}).values():
+                if isinstance(paths, list):
+                    for p in paths:
+                        if isinstance(p, str):
+                            candidates.add(os.path.abspath(p))
+            for p in self.config.get("excluded", []):
+                if isinstance(p, str):
+                    candidates.add(os.path.abspath(p))
+        return {p for p in candidates if not self._is_valid_dict_path(p)}
+
+    def _purge_invalid_dicts(self, invalid_paths: set, notify: bool = True) -> set:
+        """删除失效词典（配置 + 已加载实例），并按统一口径提示用户。
+
+        调用方负责确认传入的路径确实已失效；返回实际清理的集合。
+        路径失效与「加载失败」是两回事，后者的清理仍走 _cleanup_invalid_paths。
+        """
+        invalid_paths = set(invalid_paths or ())
+        if not invalid_paths:
+            return set()
+        self._cleanup_invalid_paths(invalid_paths)
+        for p in invalid_paths:
+            try:
+                self.manager.unload_mdx(p)
+            except Exception as exc:
+                logger.warning("卸载失效词典时异常 %s: %s", p, exc)
+        logger.warning("已删除 %d 个失效词典: %s", len(invalid_paths), sorted(invalid_paths))
+        if notify:
+            names = "、".join(os.path.basename(p) for p in sorted(invalid_paths)[:5])
+            more = f" 等 {len(invalid_paths)} 个" if len(invalid_paths) > 5 else ""
+            error_reporter.report(
+                INVALID_DICT_TITLE,
+                f"{names}{more} 已失效（文件不存在），已从词典列表和分组中删除。"
+                "如需继续使用，请重新导入该词典。",
+                level="warning",
+            )
+        return invalid_paths
 
     # ==================== 系统初始化 ====================
     def _init_system(self):
         def task():
             self._load_config()
+            # 主界面启动即检测失效词典：提示统一在此产生（启动期暂存，
+            # 由前端 get_pending_errors() 拉取后显示在主界面）
+            self._purge_invalid_dicts(self._collect_invalid_paths())
             with self._config_lock:
                 current_group = self.config.get("current_group", "")
                 group_paths = list(self.config.get("groups", {}).get(current_group, []))
@@ -329,53 +206,77 @@ class WindowApi:
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
                     if not os.path.exists(abs_p):
-                        print(f"[无效] 词典文件不存在: {p}")
+                        logger.warning("词典文件不存在: %s", p)
                         invalid_paths.add(abs_p)
-                    else:
-                        if not self.manager.load_mdx(p):
-                            print(f"[失败] 加载词典失败: {p}")
-                            invalid_paths.add(abs_p)
+                    elif not self.manager.load_mdx(p):
+                        logger.warning("加载词典失败: %s", p)
+                        invalid_paths.add(abs_p)
                 if invalid_paths:
                     self._cleanup_invalid_paths(invalid_paths)
             self._refresh_ui()
-            self._inject_custom_css_to_framework()
-        _submit_task(task)
+
+        submit_task(task)
 
     def _refresh_ui(self):
         try:
             with self._config_lock:
-                data = {"groups": [{"name": g} for g in self.config.get("groups", {}).keys()],
-                        "current": self.config.get("current_group", "")}
+                data = {
+                    "groups": [{"name": g} for g in self.config.get("groups", {}).keys()],
+                    "current": self.config.get("current_group", ""),
+                }
             self.window.evaluate_js(f"updateUI({json.dumps(data, ensure_ascii=False)})")
         except Exception:
-            pass
+            logger.debug("刷新 UI 失败（窗口可能尚未就绪）", exc_info=True)
+
+    def get_pending_errors(self):
+        """前端页面就绪后拉取启动期间暂存的后端错误（显示后即清空）。"""
+        return [list(item) for item in error_reporter.drain_pending()]
 
     # ==================== 导入逻辑 ====================
     def _load_mdx_batch(self, file_paths):
-        """统一的批量加载逻辑"""
+        """统一的批量加载逻辑。"""
+        # 导入前先过滤失效路径，避免把已经不存在的词典写进 all_dicts
+        file_paths = [p for p in file_paths
+                      if self._is_valid_dict_path(os.path.abspath(p))]
+        if not file_paths:
+            error_reporter.report(
+                INVALID_DICT_TITLE,
+                "所选词典已失效（文件不存在），未导入任何内容。", level="warning")
+            return
         with self._config_lock:
-            existing_ids = {d["id"] for d in self.config.get("all_dicts", [])}
+            existing_ids = {
+                d.get("id") for d in self.config.get("all_dicts", [])
+                if isinstance(d, dict)
+            }
             for p in file_paths:
                 abs_p = os.path.abspath(p)
                 if abs_p not in existing_ids:
                     name = os.path.splitext(os.path.basename(p))[0]
                     self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
+                    existing_ids.add(abs_p)
         # 加载词典在锁外执行
         for p in file_paths:
-            self.manager.load_mdx(os.path.abspath(p))
+            if not self.manager.load_mdx(os.path.abspath(p)):
+                logger.warning("导入词典失败: %s", p)  # 具体异常由 MdxWrapper 弹窗上报
         self._schedule_save_config()
         self._refresh_ui()
-        self.window.evaluate_js(
-            "if(document.getElementById('groupView').style.display === 'flex') pywebview.api.init_group_view();")
+        try:
+            self.window.evaluate_js(
+                "if(document.getElementById('groupView').style.display === 'flex') "
+                "pywebview.api.init_group_view();")
+        except Exception:
+            logger.debug("刷新分组视图失败", exc_info=True)
 
     def open_file(self):
         try:
             from webview import FileDialog
-            paths = self.window.create_file_dialog(FileDialog.OPEN, allow_multiple=True, file_types=('MDX (*.mdx)',))
+            paths = self.window.create_file_dialog(
+                FileDialog.OPEN, allow_multiple=True, file_types=('MDX (*.mdx)',))
             if paths:
-                _submit_task(self._load_mdx_batch, paths)
-        except Exception as e:
-            print(e)
+                submit_task(self._load_mdx_batch, paths)
+        except Exception as exc:
+            logger.exception("打开词典文件失败")
+            error_reporter.report("打开词典失败", str(exc), exc=exc)
 
     def open_folder(self):
         try:
@@ -385,11 +286,12 @@ class WindowApi:
                 from utils.path_helper import find_mdx_files
                 mdx_files = find_mdx_files(folders[0])
                 if mdx_files:
-                    _submit_task(self._load_mdx_batch, mdx_files)
+                    submit_task(self._load_mdx_batch, mdx_files)
                 else:
-                    print("该文件夹下未找到 MDX 文件")
-        except Exception as e:
-            print(e)
+                    error_reporter.report("未找到词典", "该文件夹下没有 MDX 文件", level="warning")
+        except Exception as exc:
+            logger.exception("打开词典文件夹失败")
+            error_reporter.report("打开词典失败", str(exc), exc=exc)
 
     # ==================== 分组切换与查询 ====================
     def switch_group(self, group_name: str):
@@ -400,7 +302,10 @@ class WindowApi:
         self.init_group_view()
         if group_name:
             with self._config_lock:
-                new_group_paths = {os.path.abspath(p) for p in self.config.get("groups", {}).get(group_name, [])}
+                new_group_paths = {
+                    os.path.abspath(p)
+                    for p in self.config.get("groups", {}).get(group_name, [])
+                }
                 group_paths = list(self.config.get("groups", {}).get(group_name, []))
 
             def switch_task():
@@ -409,21 +314,20 @@ class WindowApi:
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
                     if not os.path.exists(abs_p):
-                        print(f"[无效] 词典文件不存在: {p}")
+                        logger.warning("词典文件不存在: %s", p)
                         invalid_paths.add(abs_p)
-                    else:
-                        if not self.manager.load_mdx(p):
-                            print(f"[失败] 加载词典失败: {p}")
-                            invalid_paths.add(abs_p)
+                    elif not self.manager.load_mdx(p):
+                        logger.warning("加载词典失败: %s", p)
+                        invalid_paths.add(abs_p)
                 if invalid_paths:
                     self._cleanup_invalid_paths(invalid_paths)
                 self._auto_search_after_switch()
 
-            _submit_task(switch_task)
+            submit_task(switch_task)
 
     def _auto_search_after_switch(self):
         try:
-            js_code = """
+            self.window.evaluate_js("""
             (function() {
                 var input = document.getElementById('searchInput');
                 var keyword = input ? input.value.trim() : '';
@@ -432,37 +336,52 @@ class WindowApi:
                     pywebview.api.search(keyword, use_variants);
                 }
             })()
-            """
-            self.window.evaluate_js(js_code)
-        except Exception as e:
-            print(f"[DEBUG] 自动搜索失败: {e}")
+            """)
+        except Exception as exc:
+            logger.debug("自动搜索失败: %s", exc)
 
     def search(self, keyword: str, use_variants: bool):
+        """执行一次搜索。
+
+        本方法在 pywebview 的 js_api 调用线程中**同步**编排，内部的
+        ``manager.search`` 会把单词典任务提交到共享线程池并 wait(timeout)。
+        刻意不再额外套一层 ``submit_task``：在池 worker 内提交并等待池任务
+        会造成线程池饥饿死锁（详见 utils/executors.py）。
+
+        结果带回请求序号，慢请求返回时若已有更新的搜索，直接丢弃。
+        """
         with self._config_lock:
             current_group = self.config.get("current_group", "")
             group_paths = self.config.get("groups", {}).get(current_group, [])
-        if not current_group:
+        if not current_group or not group_paths:
             self.window.evaluate_js('updateResults([])')
             return
-        allowed_ids = set(os.path.abspath(p) for p in group_paths)
-        if not allowed_ids:
-            self.window.evaluate_js('updateResults([])')
-            return
+        allowed_ids = {os.path.abspath(p) for p in group_paths}
 
-        def task():
-            # manager.search 已按 allowed_ids 限定只搜当前分组词典，
-            # 避免对 open_file 加载但未入组的词典做无效扫描
+        with self._results_lock:
+            self._search_seq += 1
+            seq = self._search_seq
+
+        try:
             results = self.manager.search(keyword, use_variants, allowed_ids)
+        except Exception as exc:
+            logger.exception("搜索失败: %s", keyword)
+            error_reporter.report("搜索失败", str(exc), exc=exc)
+            return
 
-            with self._results_lock:
-                self._current_results = results
-                first_match = (results and results[0]["key"] == keyword)
+        with self._results_lock:
+            if seq != self._search_seq:
+                logger.debug("丢弃过期搜索结果 seq=%d keyword=%s", seq, keyword)
+                return  # 过期任务丢弃：已有更新的搜索
+            self._current_results = results
+            first_match = bool(results and results[0]["key"] == keyword)
 
+        try:
             self.window.evaluate_js(f"updateResults({json.dumps(results, ensure_ascii=False)})")
-            if first_match:
-                self.show_entry(0)
-
-        _submit_task(task)
+        except Exception as exc:
+            logger.warning("更新搜索结果失败: %s", exc)
+        if first_match:
+            self.show_entry(0)
 
     def show_entry(self, index: int):
         with self._results_lock:
@@ -473,8 +392,6 @@ class WindowApi:
             sources = list(item["sources"])
 
         def task():
-            # iframe 直连本地 resource server：不再把整包 HTML 经 pywebview bridge
-            # 序列化传输，由浏览器并行请求 /entry/ 路由（HTML 构建与缓存都在服务端）
             port = self.server.port
             render_list = []
             for i, source in enumerate(sources):
@@ -486,46 +403,38 @@ class WindowApi:
                     f"&k={safe_url_encode(key)}"
                 )
                 render_list.append({"dict_name": source["dict_name"], "url": url})
-
             self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
 
-        _submit_task(task)
+        submit_task(task)
 
+    # ==================== 词条 HTML（前后端分离） ====================
     def _build_complete_html(self, raw_html: str, dict_id: str, iframe_id: str) -> str:
-        # 用 lxml 流式重写所有资源链接（替代正则），覆盖多属性与 CSS url()
-        raw_html = rewrite_html_links(raw_html)
-        url_safe_dict_id = safe_url_encode(dict_id)
-        base_url = f"http://localhost:{self.server.port}/mdd/{url_safe_dict_id}/"
-        head_content = f'<base href="{base_url}">'
+        """只生成骨架 HTML；样式与脚本全部走 /static/ 静态资源。"""
+        try:
+            raw_html = rewrite_html_links(raw_html)
+        except HtmlRewriteError as exc:
+            logger.warning("词典正文 HTML 重写失败，使用原文: %s", exc)
+            error_reporter.report("词典正文解析失败", str(exc), level="warning")
 
-        custom_css_tag = f'<style>{self._custom_css}</style>' if self._custom_css else ''
+        static = f"http://localhost:{self.server.port}/static"
+        base_url = f"http://localhost:{self.server.port}/mdd/{safe_url_encode(dict_id)}/"
+        return f'''<!DOCTYPE html><html><head><meta charset="UTF-8">
+<link rel="stylesheet" href="{static}/custom.css">
+<link rel="stylesheet" href="{static}/entry.css">
+<base href="{base_url}">
+</head>
+<body data-iframe-id="{iframe_id}">
+<div id="mdx-content">{raw_html}</div>
+<script src="{static}/entry.js"></script>
+</body></html>'''
 
-        body_html = f'''<div id="mdx-content" style="padding: 8px; overflow: hidden;">
-            {raw_html}
-        </div>'''
-
-        # 注入脚本均为模块级常量；resize_script 仅替换 iframe id 占位符
-        resize_script = _RESIZE_SCRIPT_TEMPLATE.replace("__IFRAME_ID__", iframe_id)
-        image_cursor_style = '<style>img{cursor:zoom-in;}</style>'
-
-        return f'''<!DOCTYPE html><html style="overflow: hidden; font-size: 24px;"><head><meta charset="UTF-8">{custom_css_tag}{head_content}{image_cursor_style}</head>
-        <body style="margin: 0; padding: 0; height: auto;">
-        {body_html}
-        {resize_script}
-        {_ENTRY_SCRIPT}
-        {_IMAGE_SCRIPT}
-        </body></html>'''
-
-    # ==================== 词条 iframe 直连（/entry/ 路由） ====================
     def build_entry_html(self, dict_id: str, key: str, idx, iframe_id: str):
-        """供 ResourceServer 的 /entry/ 路由回调：构建词条完整 HTML（带 LRU 缓存）。
+        """供 /entry/ 路由回调：构建词条完整 HTML（带 LRU 缓存）。
 
-        缓存存"含 __IFRAME_ID__ 占位符"的模板，ifid 命中后才替换——
-        iframe 顺序变化不影响缓存命中。custom_css 变化会改变缓存键。
-        返回 None 表示词条不可用（由路由返回 404 页面）。
+        缓存存含 ``__IFRAME_ID__`` 占位符的模板，命中后才替换 iframe id；
+        custom.css 改由静态服务提供，不再进入 HTML，也就无需 css_stamp。
         """
-        css_stamp = len(self._custom_css)
-        cache_key = (dict_id, key, idx, css_stamp)
+        cache_key = (dict_id, key, idx)
         with self._entry_cache_lock:
             cached = self._entry_cache.get(cache_key)
             if cached is not None:
@@ -534,8 +443,9 @@ class WindowApi:
 
         try:
             raw_html, _ = self.manager.get_content(dict_id, key, idx)
-        except Exception as e:
-            print(f"[词条] 加载失败 {dict_id} #{idx}: {e}")
+        except Exception as exc:
+            logger.exception("词条加载失败 %s #%s", dict_id, idx)
+            error_reporter.report("词条加载失败", f"{key}（{exc}）", level="warning", exc=exc)
             return None
         if not raw_html:
             return None
@@ -549,13 +459,19 @@ class WindowApi:
 
     # ==================== 分组管理界面 ====================
     def init_group_view(self):
+        # 分组界面只静默清理，不在这里弹提示（提示统一在主界面产生）
+        self._purge_invalid_dicts(self._collect_invalid_paths(), notify=False)
         try:
             with self._config_lock:
                 all_dicts = list(self.config.get("all_dicts", []))
                 groups = self.config.get("groups", {})
                 current_group_name = self.config.get("current_group", "")
-                current_active = set(os.path.abspath(p) for p in groups.get(current_group_name, []))
-                current_excluded = set(os.path.abspath(p) for p in self.config.get("excluded", []))
+                current_active = {
+                    os.path.abspath(p) for p in groups.get(current_group_name, [])
+                }
+                current_excluded = {
+                    os.path.abspath(p) for p in self.config.get("excluded", [])
+                }
 
                 groups_data = []
                 for name, dict_list in groups.items():
@@ -563,27 +479,38 @@ class WindowApi:
                     for d_id in dict_list:
                         abs_id = os.path.abspath(d_id)
                         match_d = next((d for d in all_dicts if d.get("id") == abs_id), None)
+                        # 缺元数据时回退文件名，不再显示含糊的「未知词典」
                         dicts_in_group.append({
                             "id": abs_id,
-                            "name": match_d.get("name", "未知词典") if match_d else "未知词典"
+                            "name": (match_d.get("name") if match_d else None)
+                                    or os.path.basename(abs_id),
                         })
                     groups_data.append({"name": name, "dicts": dicts_in_group})
 
                 all_dicts_with_state = []
                 for d in all_dicts:
-                    abs_id = os.path.abspath(d.get("id"))
+                    abs_id = os.path.abspath(d.get("id", ""))
                     if abs_id in current_active:
                         status = "active"
                     elif abs_id in current_excluded:
                         status = "excluded"
                     else:
                         status = "none"
-                    all_dicts_with_state.append({"id": abs_id, "name": d.get("name", ""), "status": status})
+                    all_dicts_with_state.append({
+                        "id": abs_id,
+                        "name": d.get("name") or os.path.basename(abs_id),
+                        "status": status,
+                    })
 
-            js_code = f"renderGroupView({json.dumps(all_dicts_with_state, ensure_ascii=False)}, {json.dumps(groups_data, ensure_ascii=False)}, {json.dumps(current_group_name, ensure_ascii=False)})"
+            js_code = (
+                f"renderGroupView({json.dumps(all_dicts_with_state, ensure_ascii=False)}, "
+                f"{json.dumps(groups_data, ensure_ascii=False)}, "
+                f"{json.dumps(current_group_name, ensure_ascii=False)})"
+            )
             self.window.evaluate_js(js_code)
-        except Exception as e:
-            print(f"[DEBUG] init_group_view 错误: {e}")
+        except Exception as exc:
+            logger.exception("init_group_view 失败")
+            error_reporter.report("分组界面加载失败", str(exc), level="warning", exc=exc)
 
     def add_group(self, name: str):
         name = (name or "").strip()
@@ -599,7 +526,6 @@ class WindowApi:
         self.init_group_view()
         return {"ok": True, "name": name}
 
-
     def delete_group(self):
         with self._config_lock:
             current_group = self.config.get("current_group", "")
@@ -612,6 +538,16 @@ class WindowApi:
         self.init_group_view()
 
     def add_dict_to_group(self, dict_id):
+        abs_id = os.path.abspath(dict_id)
+        if not self._is_valid_dict_path(abs_id):
+            # 路径已失效：不加入分组，静默删除（提示只在主界面产生）
+            self._purge_invalid_dicts(self._collect_invalid_paths(), notify=False)
+            self._refresh_ui()
+            self.init_group_view()
+            return {
+                "ok": False,
+                "error": f"{INVALID_DICT_TITLE}，已删除：{os.path.basename(abs_id)}",
+            }
         with self._config_lock:
             current_group = self.config.get("current_group", "")
             groups = self.config.setdefault("groups", {})
@@ -620,18 +556,17 @@ class WindowApi:
                     current_group = next(iter(groups.keys()), "")
                     self.config["current_group"] = current_group
                 else:
-                    self.window.evaluate_js("alert('请先新建一个分组！')")
+                    error_reporter.report("无法添加词典", "请先新建一个分组！", level="warning")
                     return
             dict_list = groups[current_group]
-            abs_id = os.path.abspath(dict_id)
             if abs_id not in dict_list:
                 dict_list.append(abs_id)
                 if abs_id in self.config.get("excluded", []):
                     self.config["excluded"].remove(abs_id)
-        # 锁外加载
         self.manager.load_mdx(abs_id)
         self._schedule_save_config()
         self.init_group_view()
+        return {"ok": True}
 
     def remove_dict_from_group(self, dict_id):
         with self._config_lock:
@@ -648,28 +583,29 @@ class WindowApi:
     def exclude_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
         with self._config_lock:
-            # 从所有分组中移除该词典
             for group_name, dict_list in self.config.get("groups", {}).items():
                 if abs_id in dict_list:
                     dict_list.remove(abs_id)
-            # 加入排除列表
             if abs_id not in self.config.get("excluded", []):
                 self.config.setdefault("excluded", []).append(abs_id)
         self._schedule_save_config()
-        # 锁外卸载
         try:
             self.manager.unload_mdx(abs_id)
-        except Exception as e:
-            print(f"卸载词典时发生异常(已忽略): {e}")
+        except Exception as exc:
+            logger.warning("卸载词典时发生异常: %s", exc)
         self.init_group_view()
 
     def reload_excluded_dict(self, dict_id):
         abs_id = os.path.abspath(dict_id)
+        if not self._is_valid_dict_path(abs_id):
+            # 恢复入口同样不能把失效路径放回列表（静默清理）
+            self._purge_invalid_dicts(self._collect_invalid_paths(), notify=False)
+            self.init_group_view()
+            return
         with self._config_lock:
             if abs_id in self.config.get("excluded", []):
                 self.config["excluded"].remove(abs_id)
         self._schedule_save_config()
-        # 锁外加载
         self.manager.load_mdx(abs_id)
         self.init_group_view()
 
@@ -698,67 +634,83 @@ class WindowApi:
         abs_id = os.path.abspath(dict_id)
 
         def task():
-            with self._config_lock:
-                all_dicts = list(self.config.get("all_dicts", []))
-            target = next((d for d in all_dicts if d.get("id") == abs_id), None)
-            if not target:
-                return
-            title = target.get("name", "未知词典")
-            header_info = self.manager.get_dict_header_info(abs_id)
+            try:
+                with self._config_lock:
+                    all_dicts = list(self.config.get("all_dicts", []))
+                target = next((d for d in all_dicts if d.get("id") == abs_id), None)
+                if not target:
+                    return
+                title = target.get("name") or os.path.basename(abs_id)
+                header_info = self.manager.get_dict_header_info(abs_id)
+                parts = [
+                    f"<p><b>文件路径:</b> <code style='word-break:break-all;'>"
+                    f"{html_module.escape(target.get('id', abs_id))}</code></p>"
+                ]
+                if header_info:
+                    disp_title = header_info.get("title", "") or "（无）"
+                    source = header_info.get("title_source", "")
+                    label = f"（来自{'Header' if source == 'header' else '文件名'}）" if source else ""
+                    parts.append(
+                        f"<p style='margin-top:6px;'><b>标题:</b> {html_module.escape(disp_title)} "
+                        f"<span style='color:#888;font-size:16px;'>{label}</span></p>"
+                    )
+                    desc = header_info.get("description", "")
+                    if desc:
+                        escaped = html_module.escape(desc, quote=True)
+                        parts.append(
+                            "<p style='margin-top:8px;'><b>描述:</b></p>"
+                            f"<iframe srcdoc=\"{escaped}\" "
+                            "style='width:100%;height:150px;border:1px solid #e0e0e0;"
+                            "border-radius:4px;background:#fff;'></iframe>"
+                        )
+                    tech = []
+                    if header_info.get("version"):
+                        tech.append(f"<li><b>MDX版本:</b> v{html_module.escape(header_info['version'])}</li>")
+                    if header_info.get("encoding"):
+                        tech.append(f"<li><b>编码:</b> {html_module.escape(header_info['encoding'])}</li>")
+                    if header_info.get("encrypted"):
+                        tech.append(f"<li><b>加密:</b> {html_module.escape(header_info['encrypted'])}</li>")
+                    if header_info.get("creation_date"):
+                        tech.append(f"<li><b>创建日期:</b> {html_module.escape(header_info['creation_date'])}</li>")
+                    if header_info.get("num_entries"):
+                        tech.append(f"<li><b>词条数:</b> {header_info['num_entries']:,}</li>")
+                    if header_info.get("mdd_count"):
+                        tech.append(f"<li><b>MDD文件:</b> {header_info['mdd_count']}</li>")
+                    if tech:
+                        parts.append(
+                            "<p style='margin-top:8px;'><b>技术参数:</b></p>"
+                            f"<ul style='margin-left:20px;font-size:16px;'>{''.join(tech)}</ul>"
+                        )
+                    raw = header_info.get("raw_header", {})
+                    if raw:
+                        parts.append(
+                            "<details style='margin-top:8px;'>"
+                            "<summary style='cursor:pointer;color:#2196F3;font-size:18px;'>全部 Header 字段</summary>"
+                            "<div style='overflow:auto;background:#f5f5f5;padding:8px;"
+                            "border-radius:4px;font-size:16px;margin-top:6px;'>"
+                        )
+                        for k, v in raw.items():
+                            shown = v if len(v) <= 300 else v[:300] + "..."
+                            parts.append(
+                                f"<p style='margin:2px 0;'><b>{html_module.escape(k)}:</b> "
+                                f"<code style='word-break:break-all;'>{html_module.escape(shown)}</code></p>"
+                            )
+                        parts.append("</div></details>")
+                    if header_info.get("error"):
+                        parts.append(
+                            f"<p style='color:#f44336;margin-top:8px;'>⚠ "
+                            f"{html_module.escape(header_info['error'])}</p>"
+                        )
+                else:
+                    parts.append("<p style='color:#888;margin-top:8px;'>词典文件未加载，无法读取 Header 信息。</p>")
 
-            parts = [f"<p><b>文件路径:</b> <code style='word-break:break-all;'>{html_module.escape(target.get('id', '未知'))}</code></p>"]
+                info_str = "".join(parts)
+                self.window.evaluate_js(
+                    f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, "
+                    f"{json.dumps(info_str, ensure_ascii=False)})"
+                )
+            except Exception as exc:
+                logger.exception("读取词典信息失败: %s", abs_id)
+                error_reporter.report("读取词典信息失败", str(exc), level="warning", exc=exc)
 
-            if header_info:
-                disp_title = header_info.get("title", "") or "（无）"
-                source = header_info.get("title_source", "")
-                label = f"（来自{'Header' if source == 'header' else '文件名'}）" if source else ""
-                parts.append(f"<p style='margin-top:6px;'><b>标题:</b> {html_module.escape(disp_title)} "
-                             f"<span style='color:#888;font-size:16px;'>{label}</span></p>")
-
-                desc = header_info.get("description", "")
-                if desc:
-                    srcdoc_escaped = html_module.escape(desc, quote=True)
-                    parts.append("<p style='margin-top:8px;'><b>描述:</b></p>"
-                                 f"<iframe srcdoc=\"{srcdoc_escaped}\" ""style='width:100%;height:150px;border:1px solid #e0e0e0;border-radius:4px;""background:#fff;'></iframe>")
-
-                tech = []
-                if header_info.get("version"):
-                    tech.append(f"<li><b>MDX版本:</b> v{html_module.escape(header_info['version'])}</li>")
-                if header_info.get("encoding"):
-                    tech.append(f"<li><b>编码:</b> {html_module.escape(header_info['encoding'])}</li>")
-                if header_info.get("encrypted"):
-                    tech.append(f"<li><b>加密:</b> {html_module.escape(header_info['encrypted'])}</li>")
-                if header_info.get("creation_date"):
-                    tech.append(f"<li><b>创建日期:</b> {html_module.escape(header_info['creation_date'])}</li>")
-                num = header_info.get("num_entries", 0)
-                if num:
-                    tech.append(f"<li><b>词条数:</b> {num:,}</li>")
-                mdd_count = header_info.get("mdd_count", 0)
-                if mdd_count:
-                    tech.append(f"<li><b>MDD文件:</b> {mdd_count}</li>")
-                if tech:
-                    parts.append(f"<p style='margin-top:8px;'><b>技术参数:</b></p>"
-                                 f"<ul style='margin-left:20px;font-size:16px;'>{''.join(tech)}</ul>")
-
-                raw = header_info.get("raw_header", {})
-                if raw:
-                    parts.append("<details style='margin-top:8px;'>"
-                                 "<summary style='cursor:pointer;color:#2196F3;font-size:18px;'>全部 Header 字段</summary>"
-                                 "<div style='overflow:auto;background:#f5f5f5;padding:8px;"
-                                 "border-radius:4px;font-size:16px;margin-top:6px;'>")
-                    for k, v in raw.items():
-                        shown = v if len(v) <= 300 else v[:300] + "..."
-                        parts.append(f"<p style='margin:2px 0;'><b>{html_module.escape(k)}:</b> "
-                                     f"<code style='word-break:break-all;'>{html_module.escape(shown)}</code></p>")
-                    parts.append("</div></details>")
-
-                if header_info.get("error"):
-                    parts.append(f"<p style='color:#f44336;margin-top:8px;'>⚠ {html_module.escape(header_info['error'])}</p>")
-            else:
-                parts.append("<p style='color:#888;margin-top:8px;'>词典文件未加载，无法读取 Header 信息。</p>")
-
-            info_str = "".join(parts)
-            self.window.evaluate_js(
-                f"showDictInfoModal({json.dumps(title, ensure_ascii=False)}, {json.dumps(info_str, ensure_ascii=False)})")
-
-        _submit_task(task)
+        submit_task(task)

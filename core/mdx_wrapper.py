@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
 import html as html_module
 from typing import List, Dict, Optional, Set
 from libs.readmdict import CachedMDX, CachedMDD
+from utils import error_reporter
+
+logger = logging.getLogger(__name__)
+
 
 class MdxWrapper:
     def __init__(self, mdx_path: str, build_index: bool = True):
@@ -21,19 +26,16 @@ class MdxWrapper:
         self._closed = False  # 关闭标志：close() 后置位，避免对已关闭句柄读写
 
     def load(self, variant_handler=None) -> bool:
-        # 新任务开始：空行分隔 + 显示路径
-        print(f"\n[词典] {self.mdx_path}")
+        logger.info("[词典] %s", self.mdx_path)
         try:
             self.mdx = CachedMDX(self.mdx_path, encoding='utf-8', build_index=self._build_index)
 
             # 仅读 header 模式：不需要 MDD 资源，跳过 MDD 检测与索引构建
             if self._build_index:
-                # 加载主 MDD：name.mdd
                 mdd_path = os.path.join(self.folder_path, self.name + '.mdd')
                 if os.path.exists(mdd_path):
                     self.mdds.append(CachedMDD(mdd_path, encoding='utf-8'))
-
-                # 加载分卷 MDD：name.1.mdd, name.2.mdd ...
+                # 分卷 MDD：name.1.mdd, name.2.mdd ...
                 seq = 1
                 while True:
                     seq_mdd_path = os.path.join(self.folder_path, f"{self.name}.{seq}.mdd")
@@ -41,20 +43,20 @@ class MdxWrapper:
                         break
                     self.mdds.append(CachedMDD(seq_mdd_path, encoding='utf-8'))
                     seq += 1
-                
+
             self.variant_handler = variant_handler
             self.loaded = True
-            
-            # 加载成功：显示解析后的详细信息（不含路径）
             self._print_dict_info()
-            
-            # 输出 MDD 加载情况
             if self.mdds:
-                print(f" 资源: 检测到 {len(self.mdds)} 个 MDD 文件 (主文件 + {len(self.mdds)-1} 个分卷)" if len(self.mdds) > 1 else f" 资源: 检测到 1 个 MDD 文件")
-            
+                if len(self.mdds) > 1:
+                    logger.info(" 资源: 检测到 %d 个 MDD 文件 (主文件 + %d 个分卷)",
+                                len(self.mdds), len(self.mdds) - 1)
+                else:
+                    logger.info(" 资源: 检测到 1 个 MDD 文件")
             return True
-        except Exception as e:
-            print(f"[失败] {e}")
+        except Exception as exc:
+            logger.exception("词典加载失败: %s", self.mdx_path)
+            error_reporter.report("词典加载失败", self.mdx_path, exc=exc)
             return False
 
     def _print_dict_info(self):
@@ -64,25 +66,18 @@ class MdxWrapper:
                 return
             header = self.mdx.base_mdx.header
 
-            # 获取标题并判断来源
             title = self._get_title(header)
             title_source = self._get_title_source(header)
-
-            # 显示标题（带来源标识）
             if title_source == 'header':
-                print(f"  {title} (来自Header)")
+                logger.info("  %s (来自Header)", title)
             else:
-                print(f"  {title} (文件名)")
+                logger.info("  %s (文件名)", title)
 
-            # 描述
             description = self._get_description(header)
             if description:
-                if len(description) > 100:
-                    print(f"  描述: {description[:100]}...")
-                else:
-                    print(f"  描述: {description}")
+                shown = description[:100] + ('...' if len(description) > 100 else '')
+                logger.info("  描述: %s", shown)
 
-            # 技术参数（单行紧凑显示）
             version = self._decode_field(header.get(b'GeneratedByEngineVersion', b''))
             creation_date = self._decode_field(header.get(b'CreationDate', b''))
             encoding = self._decode_field(header.get(b'Encoding', b''))
@@ -94,13 +89,11 @@ class MdxWrapper:
             if creation_date:
                 tech_parts.append(creation_date)
             if tech_parts:
-                print(f"  参数: {' | '.join(tech_parts)}")
+                logger.info("  参数: %s", ' | '.join(tech_parts))
 
-            # 词条统计
-            num_entries = self._get_entry_count()
-            print(f"  词条: {num_entries:,} 条")
-        except Exception as e:
-            print(f"[警告] 读取词典元数据失败: {e}")
+            logger.info("  词条: %s 条", f"{self._get_entry_count():,}")
+        except Exception:
+            logger.warning("读取词典元数据失败", exc_info=True)
 
     def _get_title_source(self, header: dict) -> str:
         """判断标题来源：'header' 或 'filename'"""
@@ -160,8 +153,8 @@ class MdxWrapper:
 
             self._cached_entry_count = 0
             return 0
-        except Exception as e:
-            print(f"[调试] 获取词条数量失败: {e}")
+        except Exception:
+            logger.debug("获取词条数量失败", exc_info=True)
             self._cached_entry_count = 0
             return 0
 

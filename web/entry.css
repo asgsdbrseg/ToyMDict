@@ -1,0 +1,5 @@
+/* 词条 iframe 专用样式（由 /entry/ 路由生成的 HTML 引用） */
+html { overflow: hidden; font-size: 24px; }
+body { margin: 0; padding: 0; height: auto; }
+#mdx-content { padding: 8px; overflow: hidden; }
+img { cursor: zoom-in; }

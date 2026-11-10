@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>ToyMDict</title>
+    <link rel="stylesheet" href="__STATIC_BASE__/style.css">
+    <link rel="stylesheet" href="__STATIC_BASE__/custom.css">
+    <script>window.TOYMDICT_ORIGIN = "__ORIGIN__";</script>
+</head>
+<body>
+    <div class="toolbar">
+        <div class="menu-container">
+            <button class="menu-btn" onclick="toggleMenu('fileMenu')">打开词典 ▼</button>
+            <div id="fileMenu" class="dropdown">
+                <div class="dropdown-item" onclick="pywebview.api.open_file()">打开文件</div>
+                <div class="dropdown-item" onclick="pywebview.api.open_folder()">打开文件夹</div>
+            </div>
+        </div>
+        <div class="group-selector">
+            <span class="group-label" onclick="showGroupView()">词典分组</span>
+            <select id="groupSelect" onchange="pywebview.api.switch_group(this.value)"></select>
+        </div>
+        <label class="variant-check">
+            <input type="checkbox" id="variantCheck" checked> 异体字
+        </label>
+        <div class="search-box">
+            <input type="text" id="searchInput" placeholder="请先在上方选择分组，再输入关键词搜索..." onkeyup="handleSearch(event)">
+            <button class="search-btn" onclick="triggerSearch()" title="搜索">🔍</button>
+        </div>
+    </div>
+    <div class="main-container">
+        <div class="sidebar">
+            <div id="resultList"></div>
+        </div>
+        <div class="content-area">
+            <div id="contentArea" style="flex:1; overflow-y: auto; background: #fff; padding: 10px; scrollbar-gutter: stable;"></div>
+        </div>
+    </div>
+    <div id="groupView" class="group-view">
+        <div class="group-header">
+            <button class="btn-back" onclick="showMainView()">← 返回主界面</button>
+            <h3>词典分组管理</h3>
+        </div>
+        <div class="group-container">
+            <div class="group-panel">
+                <div class="group-panel-title">全部词典（双击查看详情）</div>
+                <div class="dict-filter-box">
+                    <input type="text" id="allDictFilter" placeholder="搜索词典名称..." oninput="filterAllDicts(this.value)">
+                </div>
+                <ul id="allDictsList"></ul>
+            </div>
+            <div class="group-panel">
+                <div class="group-controls">
+                    <select id="groupSelectGroupView" class="form-control" onchange="pywebview.api.switch_group(this.value)"></select>
+                    <button class="btn-sm" onclick="showAddGroupModal()">新建分组</button>
+                    <button class="btn-sm btn-danger" onclick="deleteCurrentGroup()">删除分组</button>
+                </div>
+                <div class="group-panel-title">当前分组词典（点击 <span class="remove-btn">✕</span> 移除）</div>
+                <ul id="groupDictsList"></ul>
+            </div>
+        </div>
+    </div>
+    <div id="dictInfoModal" class="modal" style="z-index: 1001;">
+        <div class="modal-content" style="width: 50vw; height: 80vh; display: flex; flex-direction: column;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+                <h3 id="dictInfoTitle" style="margin:0;">词典信息</h3>
+                <span style="cursor:pointer;font-size:24px;color:#aaa;" onclick="closeDictInfo()">&times;</span>
+            </div>
+            <div id="dictInfoBody" style="line-height:1.6; font-size:18px; overflow-y: auto;"></div>
+        </div>
+    </div>
+    <div class="modal" id="addGroupModal">
+        <div class="modal-content">
+            <h3>添加新分组</h3>
+            <input type="text" id="newGroupName" placeholder="请输入分组名称" onkeyup="handleAddGroupKey(event)">
+            <button class="btn-primary" onclick="confirmAddGroup()">确定</button>
+            <button onclick="closeModals()">取消</button>
+        </div>
+    </div>
+
+    <!-- 后端错误弹窗：由 utils/error_reporter.py 通过 showError() 触发 -->
+    <div id="errorModal" class="modal error-modal">
+        <div class="modal-content error-modal-content">
+            <h3 id="errorModalTitle">提示</h3>
+            <div id="errorModalBody"></div>
+            <div class="error-modal-actions">
+                <button class="btn-primary" onclick="closeErrorModal()">知道了</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 图片预览浮层 -->
+    <div id="imageOverlay" class="img-overlay">
+        <div class="img-overlay-toolbar">
+            <button type="button" class="img-btn" data-act="zoom-out" title="缩小">&#8722;</button>
+            <span id="imgZoomLabel" class="img-zoom-label">100%</span>
+            <button type="button" class="img-btn" data-act="zoom-in" title="放大">&#43;</button>
+            <button type="button" class="img-btn" data-act="reset" title="重置(适配视图)">1:1</button>
+            <button type="button" class="img-btn" data-act="close" title="关闭 (Esc)">&#10005;</button>
+        </div>
+        <img id="imageOverlayImg" class="img-overlay-img" alt="" draggable="false" />
+        <div class="img-overlay-hint">滚轮缩放 &middot; 拖拽平移 &middot; 双击复位 &middot; Esc/点击空白关闭</div>
+    </div>
+
+    <script src="__STATIC_BASE__/app.js"></script>
+</body>
+</html>
