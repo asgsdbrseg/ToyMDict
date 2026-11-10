@@ -2,7 +2,7 @@
 一个MDict玩具，用于查询mdx，mdd。
 
 
-代码：智谱清言，TRAE
+代码：智谱清言，TRAE，hy3，hy4
 
 参考：
 1. https://github.com/raymanzhang/mdict
