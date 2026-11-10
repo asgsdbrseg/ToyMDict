@@ -10,6 +10,7 @@ import html as html_module
 import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 
@@ -33,6 +34,13 @@ class WindowApi:
         self._current_results = []
         self._results_lock = threading.Lock()
         self._search_seq = 0               # 用于丢弃过期搜索结果
+        # 高级搜索（流式、按词典并行）的运行期状态
+        self._adv_seq = 0                  # 代号，递增即作废所有在途任务
+        self._adv_total = 0
+        self._adv_done = 0
+        self._adv_hits = 0
+        # 当前高级搜索的 (展开后的正则, 范围)：全文结果打开词条时用于正文高亮
+        self._adv_highlight = None
         self._config_lock = threading.RLock()
         self.config = {}
 
@@ -361,6 +369,8 @@ class WindowApi:
         with self._results_lock:
             self._search_seq += 1
             seq = self._search_seq
+            self._adv_seq += 1  # 发起普通搜索即作废在途的流式高级搜索
+            self._adv_highlight = None  # 普通搜索结果不做正文高亮
 
         try:
             results = self.manager.search(keyword, use_variants, allowed_ids)
@@ -383,6 +393,152 @@ class WindowApi:
         if first_match:
             self.show_entry(0)
 
+    # ==================== 高级搜索（正则 / 异体字 / 条目 / 全文 / 流式） ====================
+    def _eval_js(self, code: str):
+        """统一的前端调用入口：窗口可能正在关闭，失败只记日志不抛。"""
+        try:
+            self.window.evaluate_js(code)
+        except Exception as exc:
+            logger.warning("调用前端失败: %s", exc)
+
+    def get_advanced_search_dicts(self):
+        """返回当前分组的词典 ``[{id, name}]``，供二级界面渲染复选框。"""
+        with self._config_lock:
+            current_group = self.config.get("current_group", "")
+            paths = list(self.config.get("groups", {}).get(current_group, []))
+            all_dicts = list(self.config.get("all_dicts", []))
+
+        meta = {}
+        for d in all_dicts:
+            if isinstance(d, dict) and d.get("id"):
+                abs_id = os.path.abspath(d["id"])
+                meta[abs_id] = d.get("name") or os.path.splitext(os.path.basename(abs_id))[0]
+
+        result = []
+        for p in paths:
+            abs_p = os.path.abspath(p)
+            if not self._is_valid_dict_path(abs_p):
+                continue
+            result.append({
+                "id": abs_p,
+                "name": meta.get(abs_p) or os.path.splitext(os.path.basename(abs_p))[0],
+            })
+        return result
+
+    def advanced_search(self, pattern: str, scope: str, use_variants: bool,
+                        dict_ids: list):
+        """启动一次高级搜索，**立即返回**，结果由各词典线程流式追加。
+
+        每本词典一个共享池任务（多线程）；任务内边扫边分批回调，某本词典
+        扫描结束即把该批结果送回主界面结果列表，不等待其它词典。结果不合并
+        同名条目、不排序：顺序就是「词典完成顺序 + 词典内索引顺序」。
+        """
+        from core.advanced_search import compile_advanced_pattern
+
+        pattern = (pattern or "").strip()
+        if not pattern:
+            return {"ok": False, "error": "请输入搜索表达式"}
+        if scope not in ("entry", "fulltext"):
+            return {"ok": False, "error": "未知的搜索范围"}
+        ids = [os.path.abspath(p) for p in (dict_ids or []) if p]
+        if not ids:
+            return {"ok": False, "error": "请至少勾选一本词典"}
+
+        try:
+            regex, expanded = compile_advanced_pattern(
+                pattern, bool(use_variants), self.manager.get_variant_handler())
+        except re.error as exc:
+            return {"ok": False, "error": f"正则表达式无效：{exc}"}
+        except Exception as exc:
+            return {"ok": False, "error": f"无法编译表达式：{exc}"}
+
+        with self._results_lock:
+            self._search_seq += 1          # 作废旧普通搜索
+            self._adv_seq += 1             # 作废旧流式搜索
+            gen = self._adv_seq
+            self._adv_total = len(ids)
+            self._adv_done = 0
+            self._adv_hits = 0
+            self._current_results = []
+            self._adv_highlight = (expanded, scope)
+
+        # 清空主界面结果列表，先写入状态条（含展开后的实际表达式，便于核对异体字效果）
+        # 用 ASCII 转义：词典正文可能含 U+2028 等 JS 行终止符，直接拼进代码会断裂
+        self._eval_js(f"clearAdvancedResults({json.dumps(expanded)})")
+
+        for path in ids:
+            submit_task(self._advanced_scan_one, gen, path, regex, scope)
+        return {"ok": True, "total": len(ids), "expanded": expanded}
+
+    def _advanced_scan_one(self, gen: int, path: str, regex, scope: str):
+        """单词典扫描任务（在共享线程池 worker 中执行）。"""
+        from core.advanced_search import scan_dictionary, MAX_HITS_PER_DICT
+
+        def cancelled():
+            with self._results_lock:
+                return gen != self._adv_seq
+
+        wrapper = self.manager.get_wrapper(path)
+        if wrapper is None:
+            # 分组切换是异步加载的，这里兜底补一次，避免刚切完分组就搜不到
+            self.manager.load_mdx(path)
+            wrapper = self.manager.get_wrapper(path)
+        name = (wrapper.name if wrapper
+                else os.path.splitext(os.path.basename(path))[0])
+
+        def on_batch(hits):
+            with self._results_lock:
+                if gen != self._adv_seq:
+                    return
+                payload = []
+                for hit in hits:
+                    # 与 _current_results 同步追加，保证 show_entry(index) 索引对齐
+                    self._current_results.append({
+                        "key": hit["key"],
+                        "sources": [{
+                            "dict_id": path,
+                            "dict_name": name,
+                            "idx": hit["idx"],
+                        }],
+                    })
+                    payload.append({"key": hit["key"]})
+                self._adv_hits += len(payload)
+                self._eval_js(
+                    f"appendAdvancedResults({json.dumps(payload)});"
+                    f"updateAdvancedStatus({self._adv_done}, {self._adv_total}, {self._adv_hits})"
+                )
+
+        count = 0
+        try:
+            if wrapper is None:
+                logger.warning("高级搜索跳过无法加载的词典: %s", path)
+            else:
+                count = scan_dictionary(wrapper, regex, scope, on_batch, cancelled)
+                if count >= MAX_HITS_PER_DICT:
+                    logger.warning("词典 %s 命中达到上限 %d，已停止扫描",
+                                   name, MAX_HITS_PER_DICT)
+        except Exception as exc:
+            logger.exception("高级搜索词典失败: %s", name)
+            error_reporter.report("高级搜索失败", f"{name}: {exc}",
+                                  level="warning", exc=exc)
+        finally:
+            with self._results_lock:
+                if gen == self._adv_seq:
+                    self._adv_done += 1
+                    self._eval_js(
+                        f"updateAdvancedStatus({self._adv_done}, {self._adv_total}, "
+                        f"{self._adv_hits})"
+                    )
+        return count
+
+    def cancel_advanced_search(self):
+        """停止当前高级搜索：递增代号即在途任务陆续自行退出。"""
+        with self._results_lock:
+            self._adv_seq += 1
+            self._adv_done = self._adv_total
+        self._eval_js("finishAdvancedStatus(true)")
+        return {"ok": True}
+
     def show_entry(self, index: int):
         with self._results_lock:
             if index < 0 or index >= len(self._current_results):
@@ -390,9 +546,15 @@ class WindowApi:
             item = self._current_results[index]
             key = item["key"]
             sources = list(item["sources"])
+            highlight = self._adv_highlight
 
         def task():
             port = self.server.port
+            # 全文搜索的结果：把展开后的正则随 iframe URL 传入，
+            # entry.js 会在词条正文里高亮命中（含跨 <u> 等标签的情况）。
+            hl = ""
+            if highlight and highlight[1] == "fulltext" and highlight[0]:
+                hl = "&hl=" + safe_url_encode(highlight[0])
             render_list = []
             for i, source in enumerate(sources):
                 idx = source.get("idx")
@@ -401,6 +563,7 @@ class WindowApi:
                     f"?ifid=dict-iframe-{i}"
                     f"&idx={idx if idx is not None else -1}"
                     f"&k={safe_url_encode(key)}"
+                    f"{hl}"
                 )
                 render_list.append({"dict_name": source["dict_name"], "url": url})
             self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")

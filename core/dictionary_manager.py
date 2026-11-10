@@ -90,6 +90,15 @@ class DictionaryManager:
             wrappers = [(p, w) for p, w in wrappers if p in allowed_ids]
         return wrappers
 
+    def get_wrapper(self, path: str):
+        """按绝对路径取已加载的词典实例，未加载返回 None。"""
+        with self._lock:
+            return self.loaded_dicts.get(os.path.abspath(path))
+
+    def get_variant_handler(self):
+        """返回异体字处理器（未加载映射表时为 None）。"""
+        return self._variant_handler
+
     @staticmethod
     def search_one(target, keyword, use_variants):
         """单词典搜索，在共享池 worker 中执行，永不向外抛异常。"""

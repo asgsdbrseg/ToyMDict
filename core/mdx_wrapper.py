@@ -255,6 +255,32 @@ class MdxWrapper:
                     results.append((key, idx))
         return results
 
+    # ==================== 高级搜索支持 ====================
+    def iter_entries(self):
+        """按绝对索引顺序产出 ``(idx, key)``；供全文/条目正则扫描使用。"""
+        if self._closed or not self.loaded or self.mdx is None:
+            return
+        yield from self.mdx.iter_keys()
+
+    def get_raw_content(self, idx: int) -> str:
+        """按绝对索引取词条原始正文（不解析 @@@LINK、不改写 HTML）。
+
+        与 ``get_content`` 的区别：全文扫描要的是「这一条记录本身写了什么」，
+        跟随重定向会把别的词条内容算到本词条头上。
+        """
+        if self._closed or not self.loaded or self.mdx is None or idx is None:
+            return ""
+        try:
+            raw = self.mdx.get_by_index(idx)
+        except Exception as exc:
+            logger.debug("读取词条 %s #%s 失败: %s", self.name, idx, exc)
+            return ""
+        if raw is None:
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode('utf-8', errors='ignore')
+        return str(raw)
+
     def get_content(self, key: str, idx: Optional[int] = None,
                 _visited: Optional[Set[int]] = None) -> str:
         """获取词条内容，支持 @@@LINK= 递归解析与循环检测。

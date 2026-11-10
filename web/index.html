@@ -20,6 +20,8 @@
             <span class="group-label" onclick="showGroupView()">词典分组</span>
             <select id="groupSelect" onchange="pywebview.api.switch_group(this.value)"></select>
         </div>
+        <button class="adv-search-btn" onclick="openAdvancedSearch()"
+                title="高级搜索：正则 / 异体字 / 条目 / 全文 / 多选词典">⚙ 高级搜索</button>
         <label class="variant-check">
             <input type="checkbox" id="variantCheck" checked> 异体字
         </label>
@@ -75,6 +77,53 @@
             <input type="text" id="newGroupName" placeholder="请输入分组名称" onkeyup="handleAddGroupKey(event)">
             <button class="btn-primary" onclick="confirmAddGroup()">确定</button>
             <button onclick="closeModals()">取消</button>
+        </div>
+    </div>
+
+    <!-- 高级搜索二级界面：50vw × 80vh -->
+    <div id="advancedSearchModal" class="modal adv-modal">
+        <div class="adv-panel">
+            <div class="adv-header">
+                <h3>高级搜索</h3>
+                <div class="adv-header-right">
+                    <span class="adv-hint">正则默认开启</span>
+                    <span class="adv-close" title="关闭" onclick="closeModals()">&times;</span>
+                </div>
+            </div>
+
+            <!-- 第一行：搜索范围（条目 / 全文），两者都支持正则与异体字 -->
+            <div class="adv-row">
+                <span class="adv-row-label">范围</span>
+                <label class="adv-scope active">
+                    <input type="radio" name="advScope" value="entry" checked onchange="onAdvScopeChange()"> 条目
+                </label>
+                <label class="adv-scope">
+                    <input type="radio" name="advScope" value="fulltext" onchange="onAdvScopeChange()"> 全文
+                </label>
+            </div>
+
+            <!-- 第二行：异体字开关 + 搜索框（用于条目和全文） -->
+            <div class="adv-row">
+                <label class="variant-check adv-variant">
+                    <input type="checkbox" id="advVariantCheck" checked> 异体字
+                </label>
+                <input type="text" id="advPattern" class="adv-pattern"
+                       placeholder="输入正则表达式…" onkeyup="handleAdvPatternKey(event)">
+                <button class="adv-run-btn" onclick="startAdvancedSearch()">搜索</button>
+            </div>
+
+            <!-- 第三行：词典过滤框 -->
+            <div class="adv-row adv-filter-row">
+                <span class="adv-row-label">过滤词典</span>
+                <input type="text" id="advDictFilter" class="adv-filter"
+                       placeholder="按词典名称过滤…" oninput="renderAdvDicts()">
+                <button class="adv-mini-btn" onclick="advSelectAll(true)">全选</button>
+                <button class="adv-mini-btn" onclick="advSelectAll(false)">全不选</button>
+                <span class="adv-selected" id="advSelectedCount">已选 0 本</span>
+            </div>
+
+            <div class="adv-dict-head">当前分组词典（只搜索勾选的）</div>
+            <div id="advDictList" class="adv-dict-list"></div>
         </div>
     </div>
 

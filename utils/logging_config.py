@@ -3,21 +3,21 @@
 
 模块统一使用 ``logging.getLogger(__name__)``，由 ``setup_logging()`` 在
 main() 入口完成一次初始化；其余模块不再直接 print 到 stdout。
+
+日志文件 ``toymdict.log`` 每次启动以 ``mode='w'`` 清空重建，只记录本次运行；
+不做轮转、不生成任何备份文件。
 """
 import logging
-import logging.handlers
 import os
 import sys
 
 from utils.path_helper import get_app_base_dir
 
 _CONFIGURED = False
-_MAX_LOG_BYTES = 2 * 1024 * 1024
-_BACKUP_COUNT = 3
 
 
 def setup_logging(debug: bool = False, log_to_file: bool = True) -> logging.Logger:
-    """初始化根 logger（控制台 + 可选滚动文件），可重复调用但只生效一次。"""
+    """初始化根 logger（控制台 + 可选日志文件），可重复调用但只生效一次。"""
     global _CONFIGURED
     if _CONFIGURED:
         return logging.getLogger("toymdict")
@@ -41,12 +41,8 @@ def setup_logging(debug: bool = False, log_to_file: bool = True) -> logging.Logg
     if log_to_file:
         try:
             log_path = os.path.join(get_app_base_dir(), "toymdict.log")
-            file_handler = logging.handlers.RotatingFileHandler(
-                log_path,
-                maxBytes=_MAX_LOG_BYTES,
-                backupCount=_BACKUP_COUNT,
-                encoding="utf-8",
-            )
+            # mode='w'：启动时立即截断，只保留本次运行的日志；
+            file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             root.addHandler(file_handler)

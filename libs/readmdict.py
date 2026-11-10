@@ -727,6 +727,18 @@ class CachedMDX:
                 self._record_cache.popitem(last=False)
             return block_data
 
+    def iter_keys(self):
+        """按绝对索引顺序遍历全部词条名，产出 ``(abs_idx, key_str)``。
+
+        高级搜索的条目/全文扫描需要访问所有词条；这里按 key block 顺序
+        逐个解压（缓存会自动复用最近 10 块），避免调用方依赖私有字段。
+        """
+        for i in range(len(self._key_blocks_meta)):
+            keys_block = self._get_key_block(i)
+            base_abs_idx = self._key_count_prefix[i]
+            for local_idx, (_rec_offset, key_bytes) in enumerate(keys_block):
+                yield base_abs_idx + local_idx, key_bytes.decode('utf-8', errors='ignore')
+
     def search_prefix(self, prefix):
         """前缀搜索（字节级匹配，不匹配的 key 跳过 decode）。
 

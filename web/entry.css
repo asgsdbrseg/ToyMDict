@@ -3,3 +3,5 @@ html { overflow: hidden; font-size: 24px; }
 body { margin: 0; padding: 0; height: auto; }
 #mdx-content { padding: 8px; overflow: hidden; }
 img { cursor: zoom-in; }
+/* 全文搜索命中高亮（由 entry.js 按展开后的正则插入） */
+mark.adv-hl { background: #ffd54f; color: inherit; border-radius: 2px; padding: 0 1px; }

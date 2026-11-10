@@ -462,3 +462,197 @@ function pullPendingErrors() {
 }
 window.addEventListener('pywebviewready', pullPendingErrors);
 document.addEventListener('DOMContentLoaded', pullPendingErrors);
+
+// ==================== 高级搜索 ====================
+// 结果不合并、不排序：后端按「词典完成顺序 + 词典内索引顺序」流式追加，
+// 前端只负责把每批结果 append 到主界面结果列表，且索引与后端 _current_results 对齐。
+var _advState = { dicts: [], selected: {}, scope: 'entry' };
+var _advResultCount = 0;
+
+function openAdvancedSearch() {
+    var modal = document.getElementById('advancedSearchModal');
+    if (!modal) return;
+    modal.style.display = 'flex';
+    onAdvScopeChange();
+    updateAdvSelectedCount();
+    if (!window.pywebview || !pywebview.api || !pywebview.api.get_advanced_search_dicts) {
+        renderAdvDicts();
+        return;
+    }
+    pywebview.api.get_advanced_search_dicts().then(function (dicts) {
+        _advState.dicts = dicts || [];
+        // 默认全不选；切换分组后新出现的词典也默认不勾选，已有勾选状态保留
+        _advState.dicts.forEach(function (d) {
+            if (!(d.id in _advState.selected)) _advState.selected[d.id] = false;
+        });
+        renderAdvDicts();
+        updateAdvSelectedCount();
+    });
+    setTimeout(function () {
+        var el = document.getElementById('advPattern');
+        if (el) el.focus();
+    }, 50);
+}
+
+function onAdvScopeChange() {
+    var checked = document.querySelector('input[name="advScope"]:checked');
+    _advState.scope = checked ? checked.value : 'entry';
+    document.querySelectorAll('.adv-scope').forEach(function (label) {
+        var input = label.querySelector('input');
+        label.classList.toggle('active', !!input && input.checked);
+    });
+    var pattern = document.getElementById('advPattern');
+    if (pattern) pattern.placeholder = _advState.scope === 'entry'
+        ? '条目正则，例如 ^黄.* 或 説|說'
+        : '全文正则，例如 黄钟.{0,10}大吕';
+}
+
+function renderAdvDicts() {
+    var list = document.getElementById('advDictList');
+    if (!list) return;
+    var filter = document.getElementById('advDictFilter');
+    var kw = ((filter && filter.value) || '').trim().toLowerCase();
+    list.innerHTML = '';
+    if (!_advState.dicts.length) {
+        var empty = document.createElement('div');
+        empty.className = 'adv-empty';
+        empty.textContent = '当前分组没有词典，请先在「词典分组」中添加。';
+        list.appendChild(empty);
+        return;
+    }
+    _advState.dicts.forEach(function (d) {
+        var label = document.createElement('label');
+        label.className = 'adv-dict-item';
+        // 过滤只影响显示，不改变勾选状态：仍然「只搜索选中的词典」
+        if (kw && String(d.name).toLowerCase().indexOf(kw) === -1) {
+            label.style.display = 'none';
+        }
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !!_advState.selected[d.id];
+        cb.onchange = function () {
+            _advState.selected[d.id] = cb.checked;
+            updateAdvSelectedCount();
+        };
+        var name = document.createElement('span');
+        name.className = 'adv-dict-name';
+        name.textContent = d.name;
+        name.title = d.id;
+        label.appendChild(cb);
+        label.appendChild(name);
+        list.appendChild(label);
+    });
+}
+
+function advSelectAll(value) {
+    _advState.dicts.forEach(function (d) { _advState.selected[d.id] = value; });
+    renderAdvDicts();
+    updateAdvSelectedCount();
+}
+
+function updateAdvSelectedCount() {
+    var n = _advState.dicts.filter(function (d) { return _advState.selected[d.id]; }).length;
+    var el = document.getElementById('advSelectedCount');
+    if (el) el.textContent = '已选 ' + n + ' / ' + _advState.dicts.length + ' 本';
+}
+
+function handleAdvPatternKey(e) {
+    if (e.key === 'Enter') startAdvancedSearch();
+}
+
+function startAdvancedSearch() {
+    var patternEl = document.getElementById('advPattern');
+    var variantEl = document.getElementById('advVariantCheck');
+    var pattern = (patternEl && patternEl.value || '').trim();
+    var useVariants = !!(variantEl && variantEl.checked);
+    var ids = _advState.dicts
+        .filter(function (d) { return _advState.selected[d.id]; })
+        .map(function (d) { return d.id; });
+
+    if (!pattern) { showError('高级搜索', '请输入搜索表达式', 'warning'); return; }
+    if (!ids.length) { showError('高级搜索', '请至少勾选一本词典', 'warning'); return; }
+    if (!window.pywebview || !pywebview.api || !pywebview.api.advanced_search) {
+        showError('高级搜索', '后端接口不可用', 'error');
+        return;
+    }
+    pywebview.api.advanced_search(pattern, _advState.scope, useVariants, ids)
+        .then(function (res) {
+            if (!res || !res.ok) {
+                showError('高级搜索', (res && res.error) || '启动失败', 'warning');
+                return;
+            }
+            // 结果回到主界面左侧结果列表，收起二级界面以便实时查看
+            closeModals();
+        });
+}
+
+// ---------- 流式结果列表（由后端 evaluate_js 调用） ----------
+function clearAdvancedResults(expanded) {
+    var list = document.getElementById('resultList');
+    if (!list) return;
+    list.innerHTML = '';
+    _advResultCount = 0;
+
+    var status = document.createElement('div');
+    status.id = 'advStatus';
+    status.className = 'adv-status';
+    var first = document.createElement('div');
+    first.textContent = '高级搜索中… 正在扫描词典';
+    var expr = document.createElement('div');
+    expr.style.cssText = 'font-size:12px;opacity:.8;';
+    expr.textContent = '实际表达式：' + (expanded || '');
+    var stop = document.createElement('span');
+    stop.className = 'adv-stop';
+    stop.textContent = '停止';
+    stop.onclick = function () {
+        if (window.pywebview && pywebview.api && pywebview.api.cancel_advanced_search) {
+            pywebview.api.cancel_advanced_search();
+        }
+    };
+    status.appendChild(first);
+    status.appendChild(expr);
+    status.appendChild(stop);
+    list.appendChild(status);
+}
+
+function appendAdvancedResults(items) {
+    var list = document.getElementById('resultList');
+    if (!list || !items || !items.length) return;
+    items.forEach(function (r) {
+        var item = document.createElement('div');
+        item.className = 'result-item adv-result';
+        var idx = _advResultCount++;
+        item.onclick = function () { showEntry(idx); };
+
+        // 结果列表只显示词条名：不显示词典名，也不显示全文预览片段。
+        // 全文命中在打开词条后由 iframe 内的 entry.js 在正文里高亮。
+        var key = document.createElement('span');
+        key.className = 'adv-result-key';
+        key.textContent = r.key;
+        item.appendChild(key);
+        list.appendChild(item);
+    });
+}
+
+function updateAdvancedStatus(done, total, hits) {
+    var status = document.getElementById('advStatus');
+    if (!status) return;
+    var finished = done >= total;
+    status.classList.toggle('done', finished);
+    if (status.firstChild) {
+        status.firstChild.textContent = finished
+            ? '高级搜索完成：' + done + ' 本词典，命中 ' + hits + ' 条'
+            : '高级搜索中… 已完成 ' + done + ' / ' + total + ' 本词典，命中 ' + hits + ' 条';
+    }
+    var stop = status.querySelector('.adv-stop');
+    if (stop) stop.style.display = finished ? 'none' : '';
+}
+
+function finishAdvancedStatus() {
+    var status = document.getElementById('advStatus');
+    if (!status) return;
+    status.classList.add('done');
+    if (status.firstChild) status.firstChild.textContent = '高级搜索已停止';
+    var stop = status.querySelector('.adv-stop');
+    if (stop) stop.style.display = 'none';
+}
