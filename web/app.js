@@ -439,6 +439,30 @@ window.addEventListener('message', function (event) {
     overlay.addEventListener('click', function (e) {
         if (e.target === overlay) closeOverlay();
     });
+
+    // Esc 关闭：页面顶部的全局 keydown 只处理 .modal（display:flex），
+    // 而本浮层用 .show 控制显示，所以必须单独监听。用捕获阶段保证
+    // 优先于其它键盘逻辑；浮层显示时 Esc 只关图片，不误关背后的弹窗。
+    function isEscKey(e) {
+        // 部分 WebView 内核（含 IE/MSHTML）没有 e.key，只能用 keyCode
+        return e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27;
+    }
+    document.addEventListener('keydown', function (e) {
+        if (!isEscKey(e) || !overlay.classList.contains('show')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        closeOverlay();
+    }, true);
+
+    // 词条正文在 iframe 内，焦点可能停留在 iframe 里，顶层窗口收不到
+    // 键盘事件。由 entry.js 把 Esc 转发成 'esc' 消息，这里统一处理。
+    window.addEventListener('message', function (event) {
+        if (!isTrustedMessage(event)) return;
+        var data = event.data || {};
+        if (data.type === 'esc' && overlay.classList.contains('show')) {
+            closeOverlay();
+        }
+    });
 })();
 
 // ---------- 启动期后端错误 ----------
@@ -481,9 +505,9 @@ function openAdvancedSearch() {
     }
     pywebview.api.get_advanced_search_dicts().then(function (dicts) {
         _advState.dicts = dicts || [];
-        // 默认全不选；切换分组后新出现的词典也默认不勾选，已有勾选状态保留
+        // 默认全选；切换分组后新出现的词典也默认勾选，已有勾选状态保留
         _advState.dicts.forEach(function (d) {
-            if (!(d.id in _advState.selected)) _advState.selected[d.id] = false;
+            if (!(d.id in _advState.selected)) _advState.selected[d.id] = true;
         });
         renderAdvDicts();
         updateAdvSelectedCount();

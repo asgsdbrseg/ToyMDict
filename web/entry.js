@@ -101,6 +101,16 @@
         if (src) window.parent.postMessage({ type: 'open-image', url: src }, '*');
     }, true);
 
+    // ---------- Esc 转发 ----------
+    // 焦点在 iframe 内时，主窗口的 document 收不到键盘事件，图片查看器
+    // 的 Esc 就失效了。这里把 Esc 转发给主窗口，由 app.js 在浮层显示时关闭。
+    // 主窗口只在浮层已显示时响应，因此不会影响其它弹窗的 Esc 行为。
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' || e.key === 'Esc' || e.keyCode === 27) {
+            window.parent.postMessage({ type: 'esc' }, '*');
+        }
+    }, true);
+
     // ---------- 全文搜索命中高亮 ----------
     // /entry/ 的 hl 参数是「展开后的正则」，与后端扫描用的是同一份表达式。
     // 在文本节点上拼出与后端 strip_html 等价的纯文本：标签不占位、连续空白
