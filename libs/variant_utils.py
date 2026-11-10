@@ -57,7 +57,6 @@ class VariantHandler:
         for combo in itertools.product(*chars_variants):
             yield ''.join(combo)
 
-
     def build_full_regex(self, keyword: str, exact: bool = False):
         """构建完整正则匹配模式（从头匹配）
 
@@ -70,7 +69,6 @@ class VariantHandler:
         Returns:
             编译好的正则对象，或 None（无可展开字符时）
         """
-        import re
         if not keyword:
             return None
         parts = []

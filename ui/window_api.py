@@ -2,46 +2,20 @@
 import threading
 import json
 import os
+import copy
 import atexit
 import traceback
 import html as html_module
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils.path_helper import safe_url_encode, get_app_base_dir
 from utils.html_link_rewriter import rewrite_html_links
-import time
 from services import storage
+from utils.daemon_executor import DaemonThreadPoolExecutor
 
 
-# ==================== 模块级线程池 ====================
-class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
-    """工作线程为 daemon 的线程池：主线程退出时进程可正常终止，
-    避免 ThreadPoolExecutor 默认创建非 daemon 线程导致程序无法退出。
-
-    由于父类 _adjust_thread_count 会先 start 线程再返回，已 active 的线程
-    无法再修改 daemon；这里在调用父类的极短窗口内把 threading.Thread 的
-    daemon 默认值临时注入为 True（加锁避免并发竞态），不依赖私有内部结构。"""
-
-    _patch_lock = threading.Lock()
-
-    def _adjust_thread_count(self):
-        with self._patch_lock:
-            _orig_init = threading.Thread.__init__
-
-            def _daemon_init(self_t, *args, **kwargs):
-                kwargs.setdefault("daemon", True)
-                _orig_init(self_t, *args, **kwargs)
-
-            threading.Thread.__init__ = _daemon_init
-            try:
-                super()._adjust_thread_count()
-            finally:
-                threading.Thread.__init__ = _orig_init
-
-
-# 复用模块级线程池，替代每次请求都新建 threading.Thread（后台控制类任务）
-_TASK_EXECUTOR = _DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="window-api")
-# 复用模块级线程池，替代 show_entry 中每次调用新建的局部线程池（用于并行加载词条内容）
-_LOAD_EXECUTOR = _DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="load-entry")
+_TASK_EXECUTOR = DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="window-api")
+_LOAD_EXECUTOR = DaemonThreadPoolExecutor(max_workers=8, thread_name_prefix="load-entry")
 
 
 def _report_future_error(future):
@@ -65,6 +39,142 @@ def _shutdown_executors():
     _LOAD_EXECUTOR.shutdown(wait=False)
 
 
+# ==================== 词条 iframe 注入脚本（模块级常量，避免每词条重建字符串） ====================
+
+# iframe 高度自适应：ResizeObserver 覆盖图片/字体/details 等一切尺寸变化，
+# rAF 节流 + 同高去重；保留 calcHeight 消息作为父端主动请求通道。
+# "__IFRAME_ID__" 为占位符，由 _build_complete_html 替换。
+_RESIZE_SCRIPT_TEMPLATE = '''<script>(function() {
+    var id = "__IFRAME_ID__";
+    var last = -1, raf = 0;
+    function measure() {
+        raf = 0;
+        var d = document.getElementById('mdx-content');
+        if (!d) return;
+        var h = d.offsetHeight;
+        if (h === last) return;          // 同高去重，避免重复 postMessage
+        last = h;
+        window.parent.postMessage({type:'resize',id:id,height:h},'*');
+    }
+    function schedule() {                // rAF 节流：一帧最多量一次
+        if (!raf) raf = requestAnimationFrame(measure);
+    }
+    var d = document.getElementById('mdx-content');
+    if (window.ResizeObserver && d) {
+        new ResizeObserver(schedule).observe(d);   // 覆盖图片/字体/details 等一切尺寸变化
+    } else {
+        window.addEventListener("load", schedule); // 兜底（老内核）
+    }
+    window.addEventListener("message", function(e) {
+        if (e.data === 'calcHeight') schedule();   // 保留父端主动请求（兼容 details 展开）
+    });
+})();</script>'''
+
+# 音频播放与词条内链接处理（entry:// 跳转、sound:// 发音、内联 new Audio()）。
+# 完全静态，无需按词条定制。
+_ENTRY_SCRIPT = '''
+        <script>
+        (function() {
+            var currentAudio = null;
+
+            // 从 onclick 属性中提取音频 URL（兼容 new Audio('url') / "url" / `url` 及反引号包裹的情况）
+            function extractAudioUrl(onclick) {
+                if (!onclick) return null;
+                // 用反向引用匹配同种引号闭合，URL 内容允许包含反引号（紧凑样式表遗留）
+                var m = onclick.match(/new\\s+Audio\\(\\s*(['"`])(.*?)\\1\\s*\\)/);
+                if (!m) return null;
+                var url = m[2].trim();
+                // 去除 MDX 紧凑样式表遗留的反引号包裹
+                url = url.replace(/^`+|`+$/g, '');
+                return url || null;
+            }
+
+            function playAudio(url) {
+                if (!url) return;
+                try {
+                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+                    currentAudio = new Audio(url);
+                    currentAudio.play().catch(function(err) {
+                        console.error("音频播放失败:", err, "URL:", url);
+                    });
+                } catch (err) {
+                    console.error("音频播放异常:", err);
+                }
+            }
+
+            // 解码 URI 分量；畸形 % 序列（损坏词典中真实存在）返回原文而非抛异常，
+            // 避免中断捕获阶段的 click handler 导致该词条所有链接失效
+            function safeDecode(s) {
+                try { return decodeURIComponent(s); } catch (e) { return s; }
+            }
+
+            document.addEventListener('click', function(e) {
+                var a = e && e.target && e.target.closest('a');
+                if (!a) return;
+
+                var href = (a.getAttribute('href') || '').trim();
+
+                // 最高优先级：HTML 重写阶段识别出的音频链接（外部/本地音频文件）
+                var dataAudioUrl = a.getAttribute('data-audio-url');
+                if (dataAudioUrl) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    playAudio(dataAudioUrl);
+                    return;
+                }
+
+                // 处理内联 onclick 中通过 new Audio() 播放语音的情况（如在线发音）
+                var onclick = a.getAttribute('onclick') || '';
+                var audioUrl = extractAudioUrl(onclick);
+                if (audioUrl) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    playAudio(audioUrl);
+                    return;
+                }
+
+                if (href.toLowerCase().startsWith('entry://')) {
+                    e.preventDefault(); e.stopPropagation();
+                    var word = safeDecode(href.substring(8));
+                    if (word.indexOf('#') !== -1) { word = word.split('#')[0]; }
+                    if (word) { window.parent.postMessage({ type: 'entry-link', word: word }, '*'); }
+                }
+                else if (href.toLowerCase().startsWith('sound://')) {
+                    e.preventDefault(); e.stopPropagation();
+                    var soundPath = safeDecode(href.substring(8));
+                    if (soundPath.startsWith('/')) { soundPath = soundPath.substring(1); }
+                    var baseUrl = document.baseURI;
+                    var soundUrl = baseUrl + soundPath;
+                    playAudio(soundUrl);
+                }
+                else if (!href) {
+                    // 无 href 的 <a>：阻止可能的默认跳转行为
+                    e.preventDefault();
+                }
+            }, true);
+        })();
+        </script>
+        '''
+
+# 双击图片：把图片完整 URL 发给父窗口，由其主窗口浮层显示（方案A）。完全静态。
+_IMAGE_SCRIPT = '''
+        <script>
+        (function() {
+            function getImgSrc(img) {
+                 try { return img.currentSrc || img.src || ''; } catch (e) { return img.src || ''; }
+             }
+            document.addEventListener('dblclick', function(e) {
+                 var img = e && e.target && e.target.closest ? e.target.closest('img') : null;
+                 if (!img) return;
+                 var src = getImgSrc(img);
+                 if (!src) return;
+                window.parent.postMessage({ type: 'open-image', url: src }, '*');
+             }, true);
+        })();
+        </script>
+        '''
+
+
 class WindowApi:
     def __init__(self, window, manager, resource_server):
         self.window = window
@@ -77,9 +187,17 @@ class WindowApi:
         self._init_system()
         self._save_timer = None
         self._save_delay = 0.5
+        # atexit 兜底：进程退出时立即落盘，避免丢失延迟窗口内的配置改动
+        atexit.register(self._flush_config)
 
         self._custom_css = ""
         self._load_custom_css()
+        # 词条 HTML 缓存（iframe 直连 /entry/ 路由用）：
+        # key=(dict_id, key, idx, css_stamp)，value=含 __IFRAME_ID__ 占位符的完整 HTML；
+        # ifid 每次请求时才替换，避免结果顺序变化导致缓存失效
+        self._entry_cache = OrderedDict()
+        self._entry_cache_lock = threading.Lock()
+        self._ENTRY_CACHE_MAX = 32
 
     def _get_config(self, key, default=None):
         with self._config_lock:
@@ -100,6 +218,7 @@ class WindowApi:
         self.config.setdefault("groups", {})
         self.config.setdefault("excluded", [])
         self.config.setdefault("current_group", "")
+        self._config_loaded = True
 
     def _schedule_save_config(self):
         """延迟保存配置，避免频繁文件写入"""
@@ -109,11 +228,20 @@ class WindowApi:
         self._save_timer.daemon = True
         self._save_timer.start()
 
+    def _flush_config(self):
+        """atexit 兜底：取消延迟保存定时器并立即落盘，避免程序退出时
+        丢失最近一次（0.5s 延迟窗口内）的配置改动。"""
+        if self._save_timer:
+            self._save_timer.cancel()
+            self._save_timer = None
+        if getattr(self, "_config_loaded", False):
+            self._save_config_now()
+
     def _save_config_now(self):
         with self._config_lock:
             if not isinstance(self.config.get("excluded"), list):
                 self.config["excluded"] = []
-            config_snapshot = json.loads(json.dumps(self.config))  # 深拷贝避免迭代时被改
+            config_snapshot = copy.deepcopy(self.config)  # 深拷贝避免迭代时被并发修改
         storage.save_config(config_snapshot)
 
     # ==================== 自定义 CSS ====================
@@ -322,19 +450,15 @@ class WindowApi:
             return
 
         def task():
-            results = self.manager.search(keyword, use_variants)
-            filtered_results = []
-            for r in results:
-                valid_sources = [s for s in r.get("sources", [])
-                                 if os.path.abspath(s["dict_id"]) in allowed_ids]
-                if valid_sources:
-                    filtered_results.append({"key": r["key"], "sources": valid_sources})
+            # manager.search 已按 allowed_ids 限定只搜当前分组词典，
+            # 避免对 open_file 加载但未入组的词典做无效扫描
+            results = self.manager.search(keyword, use_variants, allowed_ids)
 
             with self._results_lock:
-                self._current_results = filtered_results
-                first_match = (filtered_results and filtered_results[0]["key"] == keyword)
+                self._current_results = results
+                first_match = (results and results[0]["key"] == keyword)
 
-            self.window.evaluate_js(f"updateResults({json.dumps(filtered_results, ensure_ascii=False)})")
+            self.window.evaluate_js(f"updateResults({json.dumps(results, ensure_ascii=False)})")
             if first_match:
                 self.show_entry(0)
 
@@ -349,47 +473,25 @@ class WindowApi:
             sources = list(item["sources"])
 
         def task():
-            # 单词典直接加载，避免线程池开销
-            if len(sources) == 1:
-                source = sources[0]
+            # iframe 直连本地 resource server：不再把整包 HTML 经 pywebview bridge
+            # 序列化传输，由浏览器并行请求 /entry/ 路由（HTML 构建与缓存都在服务端）
+            port = self.server.port
+            render_list = []
+            for i, source in enumerate(sources):
                 idx = source.get("idx")
-                raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
-                if not raw_html:
-                    return
-                safe_html = self._build_complete_html(raw_html, source["dict_id"], 0)
-                self.window.evaluate_js(
-                    f"setContent({json.dumps([{'dict_name': source['dict_name'], 'html': safe_html}], ensure_ascii=False)})"
+                url = (
+                    f"http://localhost:{port}/entry/{safe_url_encode(source['dict_id'])}"
+                    f"?ifid=dict-iframe-{i}"
+                    f"&idx={idx if idx is not None else -1}"
+                    f"&k={safe_url_encode(key)}"
                 )
-                return
+                render_list.append({"dict_name": source["dict_name"], "url": url})
 
-            # 多词典并行加载（复用模块级 _LOAD_EXECUTOR，不再每次新建线程池）
-            render_list = [None] * len(sources)
-
-            def _load_one(i, source):
-                idx = source.get("idx")
-                raw_html, _ = self.manager.get_content(source["dict_id"], key, idx)
-                return i, raw_html
-
-            futures = [_LOAD_EXECUTOR.submit(_load_one, i, s) for i, s in enumerate(sources)]
-            for future in as_completed(futures):
-                    try:
-                        i, raw_html = future.result()
-                    except Exception as e:
-                        print(f"[显示] 加载词条内容失败: {e}")
-                        continue
-                    if not raw_html:
-                        continue
-                    safe_html = self._build_complete_html(raw_html, sources[i]["dict_id"], i)
-                    render_list[i] = {"dict_name": sources[i]["dict_name"], "html": safe_html}
-
-            # 过滤掉 None（加载失败的），保持原始顺序
-            render_list = [r for r in render_list if r is not None]
-            if render_list:
-                self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
+            self.window.evaluate_js(f"setContent({json.dumps(render_list, ensure_ascii=False)})")
 
         _submit_task(task)
 
-    def _build_complete_html(self, raw_html: str, dict_id: str, iframe_index: int) -> str:
+    def _build_complete_html(self, raw_html: str, dict_id: str, iframe_id: str) -> str:
         # 用 lxml 流式重写所有资源链接（替代正则），覆盖多属性与 CSS url()
         raw_html = rewrite_html_links(raw_html)
         url_safe_dict_id = safe_url_encode(dict_id)
@@ -402,125 +504,48 @@ class WindowApi:
             {raw_html}
         </div>'''
 
-        resize_script = f'''<script>(function() {{
-            var t="dict-iframe-{iframe_index}";
-            function s() {{
-                var contentDiv = document.getElementById('mdx-content');
-                if (!contentDiv) return;
-                var h = contentDiv.offsetHeight;
-                window.parent.postMessage({{type:'resize',id:t,height:h}},'*');
-            }}
-            if(window.addEventListener) window.addEventListener("load", function(){{ s() }});
-            else window.attachEvent("onload", function(){{ s() }});
-            window.addEventListener("message", function(e){{
-                if(e.data==='calcHeight') setTimeout(s,50);
-            }});
-        }})();</script>'''
-
-        entry_script = '''
-        <script>
-        (function() {
-            var currentAudio = null;
-
-            // 从 onclick 属性中提取音频 URL（兼容 new Audio('url') / "url" / `url` 及反引号包裹的情况）
-            function extractAudioUrl(onclick) {
-                if (!onclick) return null;
-                // 用反向引用匹配同种引号闭合，URL 内容允许包含反引号（紧凑样式表遗留）
-                var m = onclick.match(/new\\s+Audio\\(\\s*(['"`])(.*?)\\1\\s*\\)/);
-                if (!m) return null;
-                var url = m[2].trim();
-                // 去除 MDX 紧凑样式表遗留的反引号包裹
-                url = url.replace(/^`+|`+$/g, '');
-                return url || null;
-            }
-
-            function playAudio(url) {
-                if (!url) return;
-                try {
-                    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
-                    currentAudio = new Audio(url);
-                    currentAudio.play().catch(function(err) {
-                        console.error("音频播放失败:", err, "URL:", url);
-                    });
-                } catch (err) {
-                    console.error("音频播放异常:", err);
-                }
-            }
-
-            document.addEventListener('click', function(e) {
-                var a = e && e.target && e.target.closest('a');
-                if (!a) return;
-
-                var href = (a.getAttribute('href') || '').trim();
-
-                // 最高优先级：HTML 重写阶段识别出的音频链接（外部/本地音频文件）
-                var dataAudioUrl = a.getAttribute('data-audio-url');
-                if (dataAudioUrl) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    playAudio(dataAudioUrl);
-                    return;
-                }
-
-                // 处理内联 onclick 中通过 new Audio() 播放语音的情况（如在线发音）
-                var onclick = a.getAttribute('onclick') || '';
-                var audioUrl = extractAudioUrl(onclick);
-                if (audioUrl) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    playAudio(audioUrl);
-                    return;
-                }
-
-                if (href.toLowerCase().startsWith('entry://')) {
-                    e.preventDefault(); e.stopPropagation();
-                    var word = decodeURIComponent(href.substring(8));
-                    if (word.indexOf('#') !== -1) { word = word.split('#')[0]; }
-                    if (word) { window.parent.postMessage({ type: 'entry-link', word: word }, '*'); }
-                }
-                else if (href.toLowerCase().startsWith('sound://')) {
-                    e.preventDefault(); e.stopPropagation();
-                    var soundPath = decodeURIComponent(href.substring(8));
-                    if (soundPath.startsWith('/')) { soundPath = soundPath.substring(1); }
-                    var baseUrl = document.baseURI;
-                    var soundUrl = baseUrl + soundPath;
-                    playAudio(soundUrl);
-                }
-                else if (!href) {
-                    // 无 href 的 <a>：阻止可能的默认跳转行为
-                    e.preventDefault();
-                }
-            }, true);
-        })();
-        </script>
-        '''
-
-        # 双击图片：把图片完整 URL 发给父窗口，由其主窗口浮层显示（方案A）
+        # 注入脚本均为模块级常量；resize_script 仅替换 iframe id 占位符
+        resize_script = _RESIZE_SCRIPT_TEMPLATE.replace("__IFRAME_ID__", iframe_id)
         image_cursor_style = '<style>img{cursor:zoom-in;}</style>'
-        image_script = '''
-        <script>
-        (function() {
-            function getImgSrc(img) {
-                 try { return img.currentSrc || img.src || ''; } catch (e) { return img.src || ''; }
-             }
-            document.addEventListener('dblclick', function(e) {
-                 var img = e && e.target && e.target.closest ? e.target.closest('img') : null;
-                 if (!img) return;
-                 var src = getImgSrc(img);
-                 if (!src) return;
-                window.parent.postMessage({ type: 'open-image', url: src }, '*');
-             }, true);
-        })();
-        </script>
-        '''
 
         return f'''<!DOCTYPE html><html style="overflow: hidden; font-size: 24px;"><head><meta charset="UTF-8">{custom_css_tag}{head_content}{image_cursor_style}</head>
         <body style="margin: 0; padding: 0; height: auto;">
         {body_html}
         {resize_script}
-        {entry_script}
-        {image_script}
+        {_ENTRY_SCRIPT}
+        {_IMAGE_SCRIPT}
         </body></html>'''
+
+    # ==================== 词条 iframe 直连（/entry/ 路由） ====================
+    def build_entry_html(self, dict_id: str, key: str, idx, iframe_id: str):
+        """供 ResourceServer 的 /entry/ 路由回调：构建词条完整 HTML（带 LRU 缓存）。
+
+        缓存存"含 __IFRAME_ID__ 占位符"的模板，ifid 命中后才替换——
+        iframe 顺序变化不影响缓存命中。custom_css 变化会改变缓存键。
+        返回 None 表示词条不可用（由路由返回 404 页面）。
+        """
+        css_stamp = len(self._custom_css)
+        cache_key = (dict_id, key, idx, css_stamp)
+        with self._entry_cache_lock:
+            cached = self._entry_cache.get(cache_key)
+            if cached is not None:
+                self._entry_cache.move_to_end(cache_key)
+                return cached.replace("__IFRAME_ID__", iframe_id)
+
+        try:
+            raw_html, _ = self.manager.get_content(dict_id, key, idx)
+        except Exception as e:
+            print(f"[词条] 加载失败 {dict_id} #{idx}: {e}")
+            return None
+        if not raw_html:
+            return None
+
+        html = self._build_complete_html(raw_html, dict_id, "__IFRAME_ID__")
+        with self._entry_cache_lock:
+            self._entry_cache[cache_key] = html
+            if len(self._entry_cache) > self._ENTRY_CACHE_MAX:
+                self._entry_cache.popitem(last=False)
+        return html.replace("__IFRAME_ID__", iframe_id)
 
     # ==================== 分组管理界面 ====================
     def init_group_view(self):

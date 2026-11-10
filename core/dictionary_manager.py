@@ -4,31 +4,7 @@ import os
 import json
 import threading
 import atexit
-import concurrent.futures
-
-
-class _DaemonThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
-    """工作线程为 daemon 的线程池：主线程退出时进程可正常终止，
-    避免 ThreadPoolExecutor 默认创建非 daemon 线程导致程序无法退出。
-
-    由于父类 _adjust_thread_count 会先 start 线程再返回，已 active 的线程
-    无法再修改 daemon；这里在调用父类的极短窗口内把 threading.Thread 的
-    daemon 默认值临时注入为 True（加锁避免并发竞态），不依赖私有内部结构。"""
-    _patch_lock = threading.Lock()
-
-    def _adjust_thread_count(self):
-        with self._patch_lock:
-            _orig_init = threading.Thread.__init__
-
-            def _daemon_init(self_t, *args, **kwargs):
-                kwargs.setdefault("daemon", True)
-                _orig_init(self_t, *args, **kwargs)
-
-            threading.Thread.__init__ = _daemon_init
-            try:
-                super()._adjust_thread_count()
-            finally:
-                threading.Thread.__init__ = _orig_init
+from utils.daemon_executor import DaemonThreadPoolExecutor
 
 
 class DictionaryManager:
@@ -38,7 +14,7 @@ class DictionaryManager:
         self._variant_handler = None
         self._init_variant_handler()
         # daemon 线程池：在后台线程内并行搜索多本词典，避免进程退出挂起
-        self._search_executor = _DaemonThreadPoolExecutor(
+        self._search_executor = DaemonThreadPoolExecutor(
             max_workers=8, thread_name_prefix="dict-search")
         atexit.register(self._search_executor.shutdown, wait=False)
 
@@ -103,9 +79,12 @@ class DictionaryManager:
         for wrapper in wrappers:
             wrapper.close()
 
-    def search(self, keyword: str, use_variants: bool) -> list:
+    def search(self, keyword: str, use_variants: bool, allowed_ids: set = None) -> list:
         with self._lock:
             wrappers = list(self.loaded_dicts.items())
+        # 只搜指定词典（当前分组），避免对 open_file 加载但未入组的词典做无效扫描
+        if allowed_ids is not None:
+            wrappers = [(p, w) for p, w in wrappers if p in allowed_ids]
         if not wrappers or not keyword:
             return []
 
@@ -183,12 +162,21 @@ class DictionaryManager:
 
         if wrapper.folder_path:
             try:
-                from utils.path_helper import normalize_resource_path
-                file_path = os.path.join(wrapper.folder_path, normalize_resource_path(path))
-                if os.path.isfile(file_path):
-                    with open(file_path, 'rb') as f:
+                from utils.path_helper import resolve_case_insensitive
+                # 先用原始大小写精确匹配；失败再大小写不敏感兜底，
+                # 解决大小写敏感文件系统（Linux）上外挂资源文件名大小写
+                # 与 MDX 引用不一致导致找不到的问题（MDD 内查找已由库归一化，无需处理）
+                exact_path = os.path.normpath(
+                    os.path.join(wrapper.folder_path, path.replace("\\", "/").lstrip("/"))
+                )
+                if os.path.isfile(exact_path):
+                    with open(exact_path, "rb") as f:
+                        return f.read()
+                ci_path = resolve_case_insensitive(wrapper.folder_path, path)
+                if ci_path and os.path.isfile(ci_path):
+                    with open(ci_path, "rb") as f:
                         return f.read()
             except Exception:
                 pass
-
+            
         return None

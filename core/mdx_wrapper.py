@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import os
-import re
 import html as html_module
 from typing import List, Dict, Optional, Set
 from libs.readmdict import CachedMDX, CachedMDD
@@ -9,9 +8,7 @@ class MdxWrapper:
     def __init__(self, mdx_path: str, build_index: bool = True):
         self.mdx_path = mdx_path
         self.folder_path = os.path.dirname(mdx_path)
-        self.path = mdx_path
         self.name = os.path.splitext(os.path.basename(mdx_path))[0]
-        self.dict_id = os.path.abspath(mdx_path)
 
         # False 时仅读取 header（用于查看词典信息），不构建可搜索索引
         self._build_index = build_index
@@ -21,12 +18,13 @@ class MdxWrapper:
         self.loaded = False
         self.variant_handler = None
         self._cached_entry_count = None  # 缓存词条数
+        self._closed = False  # 关闭标志：close() 后置位，避免对已关闭句柄读写
 
     def load(self, variant_handler=None) -> bool:
         # 新任务开始：空行分隔 + 显示路径
-        print(f"\n[词典] {self.path}")
+        print(f"\n[词典] {self.mdx_path}")
         try:
-            self.mdx = CachedMDX(self.path, encoding='utf-8', build_index=self._build_index)
+            self.mdx = CachedMDX(self.mdx_path, encoding='utf-8', build_index=self._build_index)
 
             # 仅读 header 模式：不需要 MDD 资源，跳过 MDD 检测与索引构建
             if self._build_index:
@@ -217,7 +215,7 @@ class MdxWrapper:
         return info
 
     def search(self, keyword: str, use_variants: bool) -> list:
-        if not self.loaded or not keyword:
+        if not self.loaded or not keyword or self._closed:
             return []
         results = []
         seen_idx = set()
@@ -264,14 +262,18 @@ class MdxWrapper:
                     results.append((key, idx))
         return results
 
-    def get_content(self, key: str, idx: int = None, _visited: Set[int] = None) -> str:
+    def get_content(self, key: str, idx: Optional[int] = None,
+                _visited: Optional[Set[int]] = None) -> str:
         """获取词条内容，支持 @@@LINK= 递归解析与循环检测。
 
         Args:
             key: 词条文本
             idx: 词条在词典中的绝对索引；为 None 时按 key 精确查找
-            _visited: 已访问的词条索引集合（内部用于循环检测）
+            _visited: 已访问的词条索引集合（内部用于循环检测）。
+                使用 ``None`` 哨兵而非可变默认对象，避免跨调用共享同一集合。
         """
+        if self._closed or not self.loaded or self.mdx is None:
+            return ""
         if _visited is None:
             _visited = set()
 
@@ -303,7 +305,8 @@ class MdxWrapper:
         return c_stripped
 
     def get_resource(self, path: str) -> bytes:
-        """按顺序在多个 MDD 中查找资源"""
+        if self._closed:
+            return None
         for mdd in self.mdds:
             try:
                 data = mdd.get(path)
@@ -314,8 +317,10 @@ class MdxWrapper:
         return None
 
     def close(self):
+        self._closed = True
         if self.mdx:
             self.mdx.close()
+            self.mdx = None
         for mdd in self.mdds:
             mdd.close()
         self.mdds.clear()

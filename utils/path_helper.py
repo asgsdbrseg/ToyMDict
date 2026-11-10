@@ -63,3 +63,28 @@ def normalize_resource_path(path: str) -> str:
     path = path.replace("\\", "/")
     path = path.lstrip("/")
     return path.lower()
+
+def resolve_case_insensitive(base_dir: str, rel_path: str):
+    """在 base_dir 下按大小写不敏感匹配 rel_path（支持多级目录与 \\ / 混用）。
+    用于大小写敏感文件系统（Linux）上，外挂资源文件名大小写与 MDX 引用
+    不一致时仍能定位到真实文件。找不到返回 None。"""
+    rel_path = (rel_path or "").replace("\\", "/").lstrip("/")
+    parts = [p for p in rel_path.split("/") if p and p != "."]
+    cur = base_dir
+    for part in parts:
+        if not os.path.isdir(cur):
+            return None
+        target = part.lower()
+        matched = None
+        try:
+            entries = os.listdir(cur)
+        except OSError:
+            return None
+        for entry in entries:
+            if entry.lower() == target:
+                matched = entry
+                break
+        if matched is None:
+            return None
+        cur = os.path.join(cur, matched)
+    return cur if os.path.isfile(cur) else None

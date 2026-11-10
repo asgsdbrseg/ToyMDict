@@ -207,26 +207,22 @@ HTML_TEMPLATE = """
             const container = document.getElementById('contentArea');
             container.innerHTML = '';
 
-            // 移除旧的消息处理器
-            if (window._iframeMsgHandler) {
-                window.removeEventListener('message', window._iframeMsgHandler);
-            }
-
-            // 新的容差策略处理器
-            window._iframeMsgHandler = function(event) {
-                if (event.data && event.data.type === 'resize') {
-                    const iframe = document.getElementById(event.data.id);
-                    if (iframe) {
-                        var newH = event.data.height;
-                        var curH = parseInt(iframe.style.height) || 0;
-                        // 核心修复：允许缩小，但高度变化小于 5px 时不触发重排（防微抖）
-                        if (Math.abs(newH - curH) > 5) {
-                            iframe.style.height = newH + 'px';
+            // 消息处理器按 iframe id 查找目标，是幂等的，只需注册一次
+            if (!window._iframeMsgHandler) {
+                window._iframeMsgHandler = function(event) {
+                    if (event.data && event.data.type === 'resize') {
+                        const iframe = document.getElementById(event.data.id);
+                        if (iframe) {
+                            var newH = event.data.height;
+                            // 子端已做 rAF 节流 + 同高去重，这里仅在高度变化时写样式
+                            if (parseInt(iframe.style.height) !== newH) {
+                                iframe.style.height = newH + 'px';
+                            }
                         }
                     }
-                }
-            };
-            window.addEventListener('message', window._iframeMsgHandler);
+                };
+                window.addEventListener('message', window._iframeMsgHandler);
+            }
 
             dictDataArray.forEach((item, index) => {
                 const details = document.createElement('details');
@@ -247,7 +243,9 @@ HTML_TEMPLATE = """
                 iframe.style.cssText = 'width: 100%; border: none; height: 0px; overflow: hidden !important;';
                 iframe.setAttribute('frameborder', '0');
                 iframe.setAttribute('scrolling', 'no');
-                iframe.srcdoc = item.html;
+                // iframe 直连本地 resource server 的 /entry/ 路由，
+                // 不再经 pywebview bridge 传输整包 HTML（srcdoc）
+                iframe.src = item.url;
 
                 iframeWrapper.appendChild(iframe);
                 details.appendChild(iframeWrapper);
@@ -264,8 +262,11 @@ HTML_TEMPLATE = """
             });
         }
         function showEntry(index) { 
-            document.querySelectorAll('.result-item').forEach(el => el.classList.remove('active')); 
-            document.querySelectorAll('.result-item')[index].classList.add('active'); 
+            const items = document.querySelectorAll('.result-item');
+            // 越界保护：结果列表刚更新、index 失配时避免 undefined.classList 崩溃
+            if (index < 0 || index >= items.length) return;
+            items.forEach(el => el.classList.remove('active')); 
+            items[index].classList.add('active'); 
             pywebview.api.show_entry(index); 
         } 
         function showGroupView() { 
@@ -453,15 +454,14 @@ HTML_TEMPLATE = """
        <div class="img-overlay-hint">滚轮缩放 &middot; 拖拽平移 &middot; 双击复位 &middot; Esc/点击空白关闭</div>
    </div>
    <style>
-       .img-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 2000; display: none; align-items: center; justify-content: center; overflow: hidden; }
+       .img-overlay { position: fixed; inset: 0; background: rgba(233,233,233,1); z-index: 2000; display: none; align-items: center; justify-content: center; overflow: hidden; }
        .img-overlay.show { display: flex; }
-       .img-overlay-toolbar { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.14); padding: 6px 10px; border-radius: 24px; z-index: 2001; }
-       .img-btn { width: 34px; height: 34px; border: none; border-radius: 50%; background: rgba(255,255,255,0.2); color: #fff; font-size: 18px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s; }
-       .img-btn:hover { background: rgba(255,255,255,0.34); }
-       .img-zoom-label { color: #fff; min-width: 48px; text-align: center; font-size: 14px; user-select: none; }
+       .img-overlay-toolbar { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: white; padding: 6px 10px; border-radius: 24px; z-index: 2001; }
+       .img-btn { width: 34px; height: 34px; border: none; border-radius: 50%; font-size: 18px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background .15s; }
+       .img-zoom-label { min-width: 48px; text-align: center; font-size: 14px; user-select: none; }
        .img-overlay-img { max-width: 100%; max-height: 100%; transform-origin: center center; cursor: grab; user-select: none; -webkit-user-drag: none; }
        .img-overlay-img.grabbing { cursor: grabbing; }
-       .img-overlay-hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); color: rgba(255,255,255,0.6); font-size: 13px; pointer-events: none; }
+       .img-overlay-hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 16px; pointer-events: none; background: white; }
    </style>
    <script>
    (function() {
@@ -482,11 +482,12 @@ HTML_TEMPLATE = """
            overlay.focus();
            scale = 1; posX = 0; posY = 0; applyTransform();
        };
-       function closeOverlay() {
-           overlay.classList.remove('show');
-           img.src = '';
-           scale = 1; posX = 0; posY = 0;
-       }
+        function closeOverlay() {
+            overlay.classList.remove('show');
+            // 置空 src 会把当前页面 URL 赋给 img 并触发多余请求，用 removeAttribute
+            img.removeAttribute('src');
+            scale = 1; posX = 0; posY = 0;
+        }
        function zoomBy(factor) {
            scale = Math.max(0.1, Math.min(scale * factor, 10));
            applyTransform();

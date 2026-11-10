@@ -28,6 +28,7 @@ def main():
 
         # 绑定 API
         api = WindowApi(window, manager, server)
+        server.set_entry_provider(api.build_entry_html)
         window.expose(
             api.open_file,
             api.open_folder,

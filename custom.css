@@ -1,14 +1,24 @@
 /* 此文件为兜底文件，用于定义全局字体，以显示生僻字。最好不要用来修改字号之类的。 */
-@layer {
-    body, #searchInput {
-        font-family: '文津宋体C 第0平面', '文津宋体C 第2平面', '文津宋体C 第3平面';
+@layer fallback {
+
+    body,
+    #searchInput {
+        font-family: '文津宋体C 第0平面', '文津宋体C 第2平面', '文津宋体C 第3平面', 'CMEXShuowenSeal';
         line-height: 1.5em;
     }
+
     img {
-        max-width: 90vw;
+        max-width: 95vw;
     }
+
     u {
-        text-underline-offset: 5px;
+        text-underline-offset: 20%;
         margin: 0 1px;
+    }
+
+    [class^="puc" i]::before {
+        content: "□";
+        color: red;
+        font-size: 1em;
     }
 }

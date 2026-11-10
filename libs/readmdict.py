@@ -205,13 +205,13 @@ class MDict(object):
             # ![0] head word text（每块首词）
             text_head_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
             i += byte_width
-            head_w = (text_head_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            head_w = (text_head_size + text_term) * (2 if self._is_utf16 else 1)
             head_text = key_block_info[i:i+head_w] if with_text else None
             i += head_w
             # ![1] tail word text（每块尾词）
             text_tail_size = unpack(byte_format, key_block_info[i:i+byte_width])[0]
             i += byte_width
-            tail_w = (text_tail_size + text_term) * (2 if self._encoding == 'UTF-16' else 1)
+            tail_w = (text_tail_size + text_term) * (2 if self._is_utf16 else 1)
             tail_text = key_block_info[i:i+tail_w] if with_text else None
             i += tail_w
             key_block_compressed_size = unpack(self._number_format, key_block_info[i:i+self._number_width])[0]
@@ -239,8 +239,8 @@ class MDict(object):
         key_start_index = 0
         while key_start_index < len(key_block):
             key_id = unpack(self._number_format, key_block[key_start_index:key_start_index+self._number_width])[0]
-            delimiter = b'\x00\x00' if self._encoding == 'UTF-16' else b'\x00'
-            width = 2 if self._encoding == 'UTF-16' else 1
+            delimiter = b'\x00\x00' if self._is_utf16 else b'\x00'
+            width = 2 if self._is_utf16 else 1
             i = key_start_index + self._number_width
             while i < len(key_block):
                 if key_block[i:i+width] == delimiter: key_end_index = i; break
@@ -455,6 +455,11 @@ class MDict(object):
     def _treat_record_data(self, data):
         return data
 
+    @property
+    def _is_utf16(self):
+        # MDX header 的 Encoding 可能写 UTF-16 / UTF-16LE / utf-16 等
+        return bool(self._encoding) and 'UTF-16' in self._encoding.upper()
+
 class MDD(MDict):
     def __init__(self, fname, passcode=None, build_index=True):
         MDict.__init__(self, fname, encoding='UTF-16', passcode=passcode, build_index=build_index)
@@ -600,8 +605,8 @@ class CachedMDX:
                     total_count += count
                     if keys_in_block:
                         self._key_blocks_meta.append({
-                            "first": keys_in_block[0][1].decode('utf-8', errors='ignore'),
-                            "last": keys_in_block[-1][1].decode('utf-8', errors='ignore'),
+                            "first": keys_in_block[0][1].decode(m._encoding, errors='ignore'),
+                            "last": keys_in_block[-1][1].decode(m._encoding, errors='ignore'),
                             "count": count,
                             "offset": data_start,
                             "comp": comp_size,
