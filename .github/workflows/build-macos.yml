@@ -1,12 +1,18 @@
-name: Build macOS (Intel & Apple Silicon)
+name: Build macOS (Intel & Apple Silicon) & Draft Release
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Custom version (leave empty to auto-increment from 1.11, e.g. 1.12)'
+        required: false
+        default: ''
   push:
     branches:
       - main
     tags:
       - 'v*'
+      - '[0-9]+.[0-9]*'
 
 permissions:
   contents: write
@@ -99,10 +105,84 @@ jobs:
             dist/ToyMDict-macOS-${{ matrix.label }}.zip
           if-no-files-found: error
 
-      - name: Publish to GitHub Release (on tag push)
-        if: startsWith(github.ref, 'refs/tags/v')
+  draft-release:
+    name: Auto-Generate Draft Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all macOS build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Determine next version (> 1.11)
+        id: next_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          python3 - << 'EOF'
+          import json
+          import os
+          import re
+          import subprocess
+
+          input_ver = os.environ.get("INPUT_VERSION", "").strip()
+          ref_name = os.environ.get("REF_NAME", "").strip()
+          ref_type = os.environ.get("REF_TYPE", "").strip()
+
+          if input_ver:
+              version = input_ver.lstrip("v")
+          elif ref_type == "tag" and re.match(r"^v?\d+\.\d+", ref_name):
+              version = ref_name.lstrip("v")
+          else:
+              candidates = [(1, 11)]  # Baseline version 1.11
+
+              # Check git tags
+              tags_out = subprocess.check_output(["git", "tag", "-l"], text=True)
+              for line in tags_out.splitlines():
+                  m = re.match(r"^v?(\d+)\.(\d+)$", line.strip())
+                  if m:
+                      candidates.append((int(m.group(1)), int(m.group(2))))
+
+              # Check existing GitHub releases (including drafts)
+              try:
+                  rel_out = subprocess.check_output(
+                      ["gh", "release", "list", "--limit", "100", "--json", "tagName,name"],
+                      text=True,
+                  )
+                  for item in json.loads(rel_out):
+                      for field in (item.get("tagName") or "", item.get("name") or ""):
+                          m = re.search(r"(\d+)\.(\d+)", field)
+                          if m:
+                              candidates.append((int(m.group(1)), int(m.group(2))))
+              except Exception:
+                  pass
+
+              major, minor = max(candidates)
+              version = f"{major}.{minor + 1}"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\n")
+              f.write(f"tag={version}\n")
+          print(f"Resolved next release version: {version}")
+          EOF
+
+      - name: Create GitHub Draft Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.next_version.outputs.tag }}
+          name: ${{ steps.next_version.outputs.version }}
+          draft: true
+          generate_release_notes: true
           files: |
-            dist/ToyMDict-macOS-${{ matrix.label }}.dmg
-            dist/ToyMDict-macOS-${{ matrix.label }}.zip
+            release_assets/*.dmg
+            release_assets/*.zip
