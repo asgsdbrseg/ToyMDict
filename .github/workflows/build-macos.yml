@@ -1,0 +1,188 @@
+name: Build macOS (Intel & Apple Silicon) & Draft Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Custom version (leave empty to auto-increment from 1.11, e.g. 1.12)'
+        required: false
+        default: ''
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+      - '[0-9]+.[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            arch: x86_64
+            label: Intel-x86_64
+          - os: macos-15
+            arch: arm64
+            label: AppleSilicon-arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install LZO C library via Homebrew
+        run: |
+          brew install lzo
+          LZO_PREFIX="$(brew --prefix lzo)"
+          echo "CPATH=${LZO_PREFIX}/include" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=${LZO_PREFIX}/lib" >> "$GITHUB_ENV"
+          echo "CFLAGS=-I${LZO_PREFIX}/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L${LZO_PREFIX}/lib" >> "$GITHUB_ENV"
+
+      - name: Install Python dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build ToyMDict.app with PyInstaller
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed \
+            --name "ToyMDict" \
+            --add-data "variants.json:." \
+            --add-data "custom.css:." \
+            --add-data "web:web" \
+            --collect-submodules "libs" \
+            --collect-submodules "core" \
+            --collect-submodules "services" \
+            --collect-submodules "ui" \
+            --collect-submodules "utils" \
+            main.py
+
+          # utils/path_helper.py resolves get_app_base_dir() to os.path.dirname(sys.executable)
+          # (Contents/MacOS) when sys.frozen is True. Copy runtime assets directly into
+          # Contents/MacOS so PyInstaller 6+ finds them alongside the executable.
+          MACOS_BIN_DIR="dist/ToyMDict.app/Contents/MacOS"
+          cp -f variants.json "$MACOS_BIN_DIR/"
+          cp -f custom.css "$MACOS_BIN_DIR/"
+          cp -R web "$MACOS_BIN_DIR/"
+
+      - name: Ad-hoc sign app bundle and create DMG / ZIP
+        run: |
+          codesign --force --deep --sign - "dist/ToyMDict.app"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/ToyMDict.app" \
+            "dist/ToyMDict-macOS-${{ matrix.label }}.zip"
+
+          mkdir -p dist/dmg_staging
+          cp -R "dist/ToyMDict.app" dist/dmg_staging/
+          ln -s /Applications dist/dmg_staging/Applications
+          hdiutil create \
+            -volname "ToyMDict" \
+            -srcfolder dist/dmg_staging \
+            -ov -format UDZO \
+            "dist/ToyMDict-macOS-${{ matrix.label }}.dmg"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ToyMDict-macOS-${{ matrix.label }}
+          path: |
+            dist/ToyMDict-macOS-${{ matrix.label }}.dmg
+            dist/ToyMDict-macOS-${{ matrix.label }}.zip
+          if-no-files-found: error
+
+  draft-release:
+    name: Auto-Generate Draft Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository with tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all macOS build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Determine next version (> 1.11)
+        id: next_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          python3 - << 'EOF'
+          import json
+          import os
+          import re
+          import subprocess
+
+          input_ver = os.environ.get("INPUT_VERSION", "").strip()
+          ref_name = os.environ.get("REF_NAME", "").strip()
+          ref_type = os.environ.get("REF_TYPE", "").strip()
+
+          if input_ver:
+              version = input_ver.lstrip("v")
+          elif ref_type == "tag" and re.match(r"^v?\d+\.\d+", ref_name):
+              version = ref_name.lstrip("v")
+          else:
+              candidates = [(1, 11)]  # Baseline version 1.11
+
+              # Check git tags
+              tags_out = subprocess.check_output(["git", "tag", "-l"], text=True)
+              for line in tags_out.splitlines():
+                  m = re.match(r"^v?(\d+)\.(\d+)$", line.strip())
+                  if m:
+                      candidates.append((int(m.group(1)), int(m.group(2))))
+
+              # Check existing GitHub releases (including drafts)
+              try:
+                  rel_out = subprocess.check_output(
+                      ["gh", "release", "list", "--limit", "100", "--json", "tagName,name"],
+                      text=True,
+                  )
+                  for item in json.loads(rel_out):
+                      for field in (item.get("tagName") or "", item.get("name") or ""):
+                          m = re.search(r"(\d+)\.(\d+)", field)
+                          if m:
+                              candidates.append((int(m.group(1)), int(m.group(2))))
+              except Exception:
+                  pass
+
+              major, minor = max(candidates)
+              version = f"{major}.{minor + 1}"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"version={version}\n")
+              f.write(f"tag={version}\n")
+          print(f"Resolved next release version: {version}")
+          EOF
+
+      - name: Create GitHub Draft Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.next_version.outputs.tag }}
+          name: ${{ steps.next_version.outputs.version }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            release_assets/*.dmg
+            release_assets/*.zip
