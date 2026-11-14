@@ -623,7 +623,7 @@ function clearAdvancedResults(expanded) {
     var first = document.createElement('div');
     first.textContent = '高级搜索中… 正在扫描词典';
     var expr = document.createElement('div');
-    expr.style.cssText = 'font-size:12px;opacity:.8;';
+    expr.style.cssText = 'opacity:.8;';
     expr.textContent = '实际表达式：' + (expanded || '');
     var stop = document.createElement('span');
     stop.className = 'adv-stop';
