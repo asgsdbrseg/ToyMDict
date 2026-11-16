@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import threading
-from collections import OrderedDict
 
 from services import storage
 from utils import error_reporter
@@ -49,12 +48,6 @@ class WindowApi:
         self._save_timer_lock = threading.Lock()
         self._save_delay = 0.5
         atexit.register(self._flush_config)
-
-        # 词条 HTML 缓存（iframe 直连 /entry/ 路由用）
-        # key=(dict_id, key, idx)，value=含 __IFRAME_ID__ 占位符的完整 HTML
-        self._entry_cache = OrderedDict()
-        self._entry_cache_lock = threading.Lock()
-        self._ENTRY_CACHE_MAX = 32
 
         self._init_system()
 
@@ -182,11 +175,7 @@ class WindowApi:
         if not invalid_paths:
             return set()
         self._cleanup_invalid_paths(invalid_paths)
-        for p in invalid_paths:
-            try:
-                self.manager.unload_mdx(p)
-            except Exception as exc:
-                logger.warning("卸载失效词典时异常 %s: %s", p, exc)
+        # 词典不常驻，句柄都在各操作内临时打开 / 关闭，这里无需再卸载
         logger.warning("已删除 %d 个失效词典: %s", len(invalid_paths), sorted(invalid_paths))
         if notify:
             names = "、".join(os.path.basename(p) for p in sorted(invalid_paths)[:5])
@@ -213,11 +202,10 @@ class WindowApi:
                 invalid_paths = set()
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
+                    # 不再预加载：词典按需打开，启动时只做存在性检查，
+                    # 避免整组词典在启动阶段就占住内存
                     if not os.path.exists(abs_p):
                         logger.warning("词典文件不存在: %s", p)
-                        invalid_paths.add(abs_p)
-                    elif not self.manager.load_mdx(p):
-                        logger.warning("加载词典失败: %s", p)
                         invalid_paths.add(abs_p)
                 if invalid_paths:
                     self._cleanup_invalid_paths(invalid_paths)
@@ -262,9 +250,9 @@ class WindowApi:
                     name = os.path.splitext(os.path.basename(p))[0]
                     self.config.setdefault("all_dicts", []).append({"id": abs_p, "name": name})
                     existing_ids.add(abs_p)
-        # 加载词典在锁外执行
+        # 导入时校验一次（打开后立即关闭），坏词典当场提示；不保留任何句柄
         for p in file_paths:
-            if not self.manager.load_mdx(os.path.abspath(p)):
+            if not self.manager.probe(os.path.abspath(p)):
                 logger.warning("导入词典失败: %s", p)  # 具体异常由 MdxWrapper 弹窗上报
         self._schedule_save_config()
         self._refresh_ui()
@@ -310,22 +298,15 @@ class WindowApi:
         self.init_group_view()
         if group_name:
             with self._config_lock:
-                new_group_paths = {
-                    os.path.abspath(p)
-                    for p in self.config.get("groups", {}).get(group_name, [])
-                }
                 group_paths = list(self.config.get("groups", {}).get(group_name, []))
 
             def switch_task():
-                self.manager.unload_all_except(new_group_paths)
                 invalid_paths = set()
                 for p in group_paths:
                     abs_p = os.path.abspath(p)
+                    # 词典按需打开：切组只校验存在性，不预加载、不常驻
                     if not os.path.exists(abs_p):
                         logger.warning("词典文件不存在: %s", p)
-                        invalid_paths.add(abs_p)
-                    elif not self.manager.load_mdx(p):
-                        logger.warning("加载词典失败: %s", p)
                         invalid_paths.add(abs_p)
                 if invalid_paths:
                     self._cleanup_invalid_paths(invalid_paths)
@@ -364,7 +345,8 @@ class WindowApi:
         if not current_group or not group_paths:
             self.window.evaluate_js('updateResults([])')
             return
-        allowed_ids = {os.path.abspath(p) for p in group_paths}
+        # 词典不常驻：本次要搜的词典路径直接从分组配置取
+        search_paths = [os.path.abspath(p) for p in group_paths]
 
         with self._results_lock:
             self._search_seq += 1
@@ -373,7 +355,7 @@ class WindowApi:
             self._adv_highlight = None  # 普通搜索结果不做正文高亮
 
         try:
-            results = self.manager.search(keyword, use_variants, allowed_ids)
+            results = self.manager.search(keyword, use_variants, search_paths)
         except Exception as exc:
             logger.exception("搜索失败: %s", keyword)
             error_reporter.report("搜索失败", str(exc), exc=exc)
@@ -429,9 +411,11 @@ class WindowApi:
                         dict_ids: list):
         """启动一次高级搜索，**立即返回**，结果由各词典线程流式追加。
 
-        每本词典一个共享池任务（多线程）；任务内边扫边分批回调，某本词典
-        扫描结束即把该批结果送回主界面结果列表，不等待其它词典。结果不合并
-        同名条目、不排序：顺序就是「词典完成顺序 + 词典内索引顺序」。
+        每本词典起一个**临时守护线程**，扫描结束即退出，不占用共享线程池、
+        不留常驻 worker（空闲时线程数为 0，内存随之回落）。任务内边扫边分批
+        回调，某本词典扫描结束即把该批结果送回主界面结果列表，不等待其它
+        词典。结果不合并同名条目、不排序：顺序就是「词典完成顺序 + 词典内
+        索引顺序」。
         """
         from core.advanced_search import compile_advanced_pattern
 
@@ -467,22 +451,26 @@ class WindowApi:
         self._eval_js(f"clearAdvancedResults({json.dumps(expanded)})")
 
         for path in ids:
-            submit_task(self._advanced_scan_one, gen, path, regex, scope)
+            # 每本词典一个临时守护线程：用完即退，不进共享池、无常驻 worker。
+            t = threading.Thread(
+                target=self._advanced_scan_one,
+                args=(gen, path, regex, scope),
+                name=f"adv-scan-{gen}-{os.path.basename(path)}",
+                daemon=True,
+            )
+            t.start()
         return {"ok": True, "total": len(ids), "expanded": expanded}
 
     def _advanced_scan_one(self, gen: int, path: str, regex, scope: str):
-        """单词典扫描任务（在共享线程池 worker 中执行）。"""
+        """单词典扫描任务（在独立临时守护线程中执行，结束即退出）。"""
         from core.advanced_search import scan_dictionary, MAX_HITS_PER_DICT
 
         def cancelled():
             with self._results_lock:
                 return gen != self._adv_seq
 
-        wrapper = self.manager.get_wrapper(path)
-        if wrapper is None:
-            # 分组切换是异步加载的，这里兜底补一次，避免刚切完分组就搜不到
-            self.manager.load_mdx(path)
-            wrapper = self.manager.get_wrapper(path)
+        # 词典不常驻：本任务临时打开，扫描结束后在 finally 里关闭
+        wrapper = self.manager.open_mdx(path)
         name = (wrapper.name if wrapper
                 else os.path.splitext(os.path.basename(path))[0])
 
@@ -522,6 +510,12 @@ class WindowApi:
             error_reporter.report("高级搜索失败", f"{name}: {exc}",
                                   level="warning", exc=exc)
         finally:
+            # 用完即关：不把词典句柄留到下一次搜索
+            if wrapper is not None:
+                try:
+                    wrapper.close()
+                except Exception:
+                    logger.debug("关闭词典失败: %s", path, exc_info=True)
             with self._results_lock:
                 if gen == self._adv_seq:
                     self._adv_done += 1
@@ -592,18 +586,12 @@ class WindowApi:
 </body></html>'''
 
     def build_entry_html(self, dict_id: str, key: str, idx, iframe_id: str):
-        """供 /entry/ 路由回调：构建词条完整 HTML（带 LRU 缓存）。
+        """供 /entry/ 路由回调：构建词条完整 HTML（无缓存，逐次重建）。
 
-        缓存存含 ``__IFRAME_ID__`` 占位符的模板，命中后才替换 iframe id；
-        custom.css 改由静态服务提供，不再进入 HTML，也就无需 css_stamp。
+        不再缓存词条 HTML：大词典单条正文可达数百 KB～数 MB，缓存几十条就是
+        几十 MB 常驻；改为每次读取（词典自身有块级缓存，读取成本很低）。
+        custom.css 由静态服务提供，不进入 HTML，因此无需 css_stamp。
         """
-        cache_key = (dict_id, key, idx)
-        with self._entry_cache_lock:
-            cached = self._entry_cache.get(cache_key)
-            if cached is not None:
-                self._entry_cache.move_to_end(cache_key)
-                return cached.replace("__IFRAME_ID__", iframe_id)
-
         try:
             raw_html, _ = self.manager.get_content(dict_id, key, idx)
         except Exception as exc:
@@ -613,12 +601,8 @@ class WindowApi:
         if not raw_html:
             return None
 
-        html = self._build_complete_html(raw_html, dict_id, "__IFRAME_ID__")
-        with self._entry_cache_lock:
-            self._entry_cache[cache_key] = html
-            if len(self._entry_cache) > self._ENTRY_CACHE_MAX:
-                self._entry_cache.popitem(last=False)
-        return html.replace("__IFRAME_ID__", iframe_id)
+        html = self._build_complete_html(raw_html, dict_id, iframe_id)
+        return html
 
     # ==================== 分组管理界面 ====================
     def init_group_view(self):
@@ -726,7 +710,7 @@ class WindowApi:
                 dict_list.append(abs_id)
                 if abs_id in self.config.get("excluded", []):
                     self.config["excluded"].remove(abs_id)
-        self.manager.load_mdx(abs_id)
+        # 词典按需打开，加组/恢复时无需预加载
         self._schedule_save_config()
         self.init_group_view()
         return {"ok": True}
@@ -752,10 +736,7 @@ class WindowApi:
             if abs_id not in self.config.get("excluded", []):
                 self.config.setdefault("excluded", []).append(abs_id)
         self._schedule_save_config()
-        try:
-            self.manager.unload_mdx(abs_id)
-        except Exception as exc:
-            logger.warning("卸载词典时发生异常: %s", exc)
+        # 词典不常驻，排除时没有句柄需要释放
         self.init_group_view()
 
     def reload_excluded_dict(self, dict_id):
@@ -769,7 +750,7 @@ class WindowApi:
             if abs_id in self.config.get("excluded", []):
                 self.config["excluded"].remove(abs_id)
         self._schedule_save_config()
-        self.manager.load_mdx(abs_id)
+        # 词典按需打开，恢复时无需预加载
         self.init_group_view()
 
     def move_dict(self, dict_id: str, action: str):

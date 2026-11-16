@@ -25,8 +25,9 @@ class MdxWrapper:
         self._cached_entry_count = None  # 缓存词条数
         self._closed = False  # 关闭标志：close() 后置位，避免对已关闭句柄读写
 
-    def load(self, variant_handler=None) -> bool:
-        logger.info("[词典] %s", self.mdx_path)
+    def load(self, variant_handler=None, quiet: bool = False) -> bool:
+        if not quiet:
+            logger.info("[词典] %s", self.mdx_path)
         try:
             self.mdx = CachedMDX(self.mdx_path, encoding='utf-8', build_index=self._build_index)
 
@@ -46,13 +47,15 @@ class MdxWrapper:
 
             self.variant_handler = variant_handler
             self.loaded = True
-            self._print_dict_info()
-            if self.mdds:
-                if len(self.mdds) > 1:
-                    logger.info(" 资源: 检测到 %d 个 MDD 文件 (主文件 + %d 个分卷)",
-                                len(self.mdds), len(self.mdds) - 1)
-                else:
-                    logger.info(" 资源: 检测到 1 个 MDD 文件")
+            # 按需模式每次操作都会打开词典，逐次打印元数据会把日志刷满
+            if not quiet:
+                self._print_dict_info()
+                if self.mdds:
+                    if len(self.mdds) > 1:
+                        logger.info(" 资源: 检测到 %d 个 MDD 文件 (主文件 + %d 个分卷)",
+                                    len(self.mdds), len(self.mdds) - 1)
+                    else:
+                        logger.info(" 资源: 检测到 1 个 MDD 文件")
             return True
         except Exception as exc:
             logger.exception("词典加载失败: %s", self.mdx_path)

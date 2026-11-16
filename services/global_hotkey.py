@@ -179,13 +179,15 @@ class GlobalHotkeyService:
             self._copy_selection()
             new = self._get_clipboard()
 
-            # 候选文字判定：
-            #   优先使用复制动作之后的剪贴板内容（new），它对应「当前选中文字」；
-            #   若复制未改变剪贴板（例如用户早已手动 Ctrl+C 过该文字），则回退到
-            #   复制前的剪贴板内容（old）。这样「选中后直接双击 Ctrl」与
-            #   「先 Ctrl+C 再双击 Ctrl」两种用法都能命中。
-            candidate = new if (new and new.strip()) else old
-            text = candidate.strip() if (candidate and candidate.strip()) else None
+            # 取词判定：只有本次 Ctrl+C **真正更新了剪贴板**（new != old），
+            # 才说明当前有选中文字、复制生效，取 new 作为词。
+            # 若 new 与 old 一致，意味着焦点窗口没有选中文字（Ctrl+C 无效），
+            # 此时绝不能把剪贴板里原有的内容误当作取词结果发送出去——否则
+            # 用户没选词却把旧剪贴板搜了一遍，即「误发送剪贴板」。
+            if new is not None and new.strip() and new != old:
+                text = new.strip()
+            else:
+                text = None
 
             # 还原用户原来的剪贴板内容
             if self.restore_clipboard and old is not None:

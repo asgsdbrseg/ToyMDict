@@ -12,6 +12,7 @@ pywebview 的 API 调用线程（见 ``ui/window_api.py`` 的 ``search``），
 """
 import atexit
 import logging
+import os
 import threading
 import traceback
 
@@ -19,7 +20,26 @@ from utils.daemon_executor import DaemonThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 8
+
+def _elastic_max_workers() -> int:
+    """按逻辑 CPU 数弹性决定线程池上限。
+
+    词典搜索以磁盘 I/O + 块解压为主，线程数对齐逻辑核心可以让 I/O 等待
+    互相重叠；上下限防止单核机器过少、超多核机器开太多线程推高内存。
+    ``ThreadPoolExecutor`` 按需懒创建线程，实际线程数还受每次提交的词典
+    数量约束，因此这里只是上限。可用 ``TOYMDICT_MAX_WORKERS`` 覆盖以便调优。
+    """
+    override = os.environ.get("TOYMDICT_MAX_WORKERS")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            logger.warning("忽略无效的 TOYMDICT_MAX_WORKERS=%r", override)
+    cpu = os.cpu_count() or 4
+    return max(2, min(cpu, 16))
+
+
+MAX_WORKERS = _elastic_max_workers()
 
 _executor = None
 _lock = threading.Lock()

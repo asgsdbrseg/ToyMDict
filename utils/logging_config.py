@@ -42,10 +42,19 @@ def setup_logging(debug: bool = False, log_to_file: bool = True) -> logging.Logg
         try:
             log_path = os.path.join(get_app_base_dir(), "toymdict.log")
             # mode='w'：启动时立即截断，只保留本次运行的日志；
+            # 不设 maxBytes/backupCount，因此不会轮转、不会生成 .1/.2/.3
             file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)
             root.addHandler(file_handler)
+            # 顺手清掉旧版本轮转遗留的备份文件
+            for suffix in (".1", ".2", ".3"):
+                try:
+                    os.remove(log_path + suffix)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
         except Exception as exc:  # 日志本身失败不能阻止程序启动
             print(f"[日志] 文件日志不可用: {exc}", file=sys.stderr)
 

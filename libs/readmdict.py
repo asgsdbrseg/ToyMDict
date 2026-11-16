@@ -23,6 +23,7 @@ import re
 import sys
 import os
 import json
+import warnings
 import threading
 import itertools
 from collections import OrderedDict
@@ -88,6 +89,271 @@ def _decrypt_regcode_by_userid(reg_code, userid):
     encrypt_key = s20.encryptBytes(reg_code)
     return encrypt_key
 
+
+# =============================================================================
+# MDX 格式兼容层
+# -----------------------------------------------------------------------------
+# 对照 raymanzhang/mdx（Rust libmdx）的 storage_block.rs / compression.rs /
+# encryption.rs / key_block_index_unit.rs / meta_unit.rs，把 V1/V2/V3 在
+# 「块头位布局、压缩算法、加密与 CRC 归属、索引头 CRC、缺省编码」上的分歧
+# 集中在这一处处理。解析流程只调用本层函数，不再散落硬编码魔数与版本判断。
+#
+#   #1 key_block_info 块头按位解析（00/01/02/12… 不再硬匹配 02 00 00 00）
+#   #2 数据块 adler32 按「是否加密」判定归属，而非按引擎版本
+#   #3 压缩方法 0..5：None / LZO / Deflate / LZMA / Bzip2 / LZ4
+#   #4 缺 GeneratedByEngineVersion 时回退 RequiredEngineVersion / 结构探测
+#   #5 40 字节索引头后的 4 字节 CRC 校验
+#   #6 缺省 Encoding：V1/V2 → UTF-16LE，V3 → UTF-8
+# =============================================================================
+
+# 压缩方法编号与 Rust CompressionMethod 一致
+_COMPAT_COMP_NAMES = {0: 'none', 1: 'LZO', 2: 'deflate/zlib',
+                      3: 'LZMA', 4: 'Bzip2', 5: 'LZ4'}
+
+
+def _compat_head(head4):
+    """【#1】按位拆解 4 字节块头。
+
+    Rust storage_block::decode_block 把它看成：
+    byte0 低 4 位 = 压缩方法、高 4 位 = 加密方法，byte1 = 加密长度，
+    byte2-3 = 保留。旧实现只认 ``02 00 00 00`` / ``00 00 00 00`` 两个魔数，
+    于是 LZO(01)、带加密标记(12) 的词典直接报「魔数不匹配」。
+    """
+    if len(head4) < 4:
+        raise ValueError("MDX 块头长度不足 4 字节")
+    value = unpack('<L', head4[:4])[0]
+    return {
+        'compression': value & 0x0F,
+        'encryption': (value >> 4) & 0x0F,
+        'encrypted_size': (value >> 8) & 0xFF,
+        'raw': value,
+    }
+
+
+def _compat_decompress(method, data, expected_size=None):
+    """【#3】解压一个块，支持 0..5 六种方法（Rust CompressionMethod）。"""
+    if method == 0:
+        out = data
+    elif method == 1:
+        if lzo is None:
+            raise RuntimeError("LZO 压缩块需要 lzo 模块（pip install python-lzo）")
+        if not expected_size:
+            raise ValueError("LZO 压缩块缺少解压后大小")
+        out = lzo.decompress(b'\xf0' + pack('>I', expected_size) + data)
+    elif method == 2:
+        out = zlib.decompress(data)
+    elif method == 3:
+        import lzma
+        try:
+            out = lzma.decompress(data, format=lzma.FORMAT_ALONE)
+        except lzma.LZMAError:
+            out = lzma.decompress(data)
+    elif method == 4:
+        import bz2
+        out = bz2.decompress(data)
+    elif method == 5:
+        try:
+            import lz4.frame
+        except ImportError as exc:
+            raise RuntimeError("LZ4 压缩块需要 lz4 模块（pip install lz4）") from exc
+        out = lz4.frame.decompress(data)
+    else:
+        raise ValueError("MDX 未知压缩方法 %d（支持 0..5）" % method)
+    if expected_size and len(out) != expected_size:
+        raise ValueError("MDX 块解压大小不匹配: 期望 %d, 实际 %d"
+                         % (expected_size, len(out)))
+    return out
+
+
+def _compat_crc_ok(expected, *candidates):
+    """adler32 是否命中任一候选数据。"""
+    return any((zlib.adler32(c) & 0xffffffff) == expected for c in candidates)
+
+
+def _compat_verify_block_crc(expected, decrypted_block, decompressed_block, encrypted):
+    """【#2】校验数据块 adler32。
+
+    Rust：``crc_is_for_compressed_data = encryption_method != None``，
+    即加密块校验「解密后但未解压」的数据，未加密块校验「解压后」的数据。
+    旧实现按 ``_version >= 3`` 分派，V2 加密块 / V3 非加密块会误判。
+
+    这里按加密标记选主对象，同时允许另一种写法通过（不同打包器实现有差异），
+    两者都不匹配才判定为数据损坏。
+    """
+    primary = decrypted_block if encrypted else decompressed_block
+    secondary = decompressed_block if encrypted else decrypted_block
+    if not _compat_crc_ok(expected, primary, secondary):
+        raise ValueError("MDX 数据块校验失败 (adler32): 期望 %#x, "
+                         "压缩数据 %#x, 解压数据 %#x"
+                         % (expected, zlib.adler32(decrypted_block) & 0xffffffff,
+                            zlib.adler32(decompressed_block) & 0xffffffff))
+
+
+def _compat_verify_index_crc(idx_para, crc_bytes):
+    """【#5】校验 40 字节索引头之后的 4 字节 adler32。
+
+    Rust key_block_index_unit::read_idx_para_v1_v2 会严格校验这段 CRC；
+    旧实现用 ``f.read(4)`` 直接丢弃，索引头损坏时无法发现。
+    个别打包器把 CRC 算在加密前的字节上，因此这里只告警不中断加载，
+    避免把「兼容性修复」变成新的加载失败。
+    """
+    if not crc_bytes or len(crc_bytes) < 4:
+        warnings.warn("MDX 索引头缺少 CRC 字段", RuntimeWarning)
+        return False
+    # 规范为大端，但个别打包器按小端写入；两种都接受，避免误报
+    expected_be = unpack('>I', crc_bytes[:4])[0]
+    expected_le = unpack('<I', crc_bytes[:4])[0]
+    actual = zlib.adler32(idx_para) & 0xffffffff
+    if actual in (expected_be, expected_le):
+        return True
+    warnings.warn("MDX 索引头 CRC 校验失败: 声明 %#x, 实际 %#x"
+                  % (expected_be, actual), RuntimeWarning)
+    return False
+
+
+def _compat_decode_key_block_info(raw, data_encrypted, expected_size=None):
+    """【#1/#3】解码 V2/V3 的 key_block_info，返回解压后的索引字节。"""
+    if len(raw) < 8:
+        raise ValueError("MDX key block info 长度不足 8 字节")
+    head = _compat_head(raw[:4])
+    crc = unpack('>I', raw[4:8])[0]
+
+    body = bytearray(raw)
+    # 数据区加密（Encrypted=2 / RegisterBy）：官方 MdxBuilder 解密范围是 [8:]
+    if data_encrypted:
+        key = ripemd128(raw[4:8] + pack('<L', 0x3695))
+        body[8:] = _fast_decrypt(bytes(body[8:]), key)
+    # 块头自身声明的块级加密：只解前 encrypted_size 字节
+    if head['encryption'] and head['encrypted_size']:
+        n = min(head['encrypted_size'], len(body) - 8)
+        if n > 0:
+            key = ripemd128(raw[4:8])
+            body[8:8 + n] = _fast_decrypt(bytes(body[8:8 + n]), key)
+
+    payload = bytes(body[8:])
+    info = _compat_decompress(head['compression'], payload, expected_size)
+    _compat_verify_block_crc(crc, payload, info,
+                             bool(head['encryption'] or data_encrypted))
+    return info
+
+
+# 版本字段优先级：部分打包器只写其中一个，个别老词典两个都没有
+_COMPAT_VERSION_KEYS = (b'GeneratedByEngineVersion',
+                        b'RequiredEngineVersion',
+                        b'EngineVersion',
+                        b'Version')
+
+
+def _compat_parse_version(value):
+    """【#4】把 header 里的版本值解析成 float。
+
+    容忍 ``2.0.1`` / ``v3`` / ``3`` / 空值等写法；只接受 1.x/2.x/3.x，
+    明显脏数据返回 None 交给结构探测，避免 float() 抛 ValueError / KeyError。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode('ascii', errors='ignore')
+    match = re.search(r'\d+(?:\.\d+)?', str(value).strip())
+    if not match:
+        return None
+    try:
+        version = float(match.group(0))
+    except ValueError:
+        return None
+    return version if 1.0 <= version < 4.0 else None
+
+
+def _compat_probe_version(fname, offset, encrypted_index=False):
+    """【#4】header 未给出可用版本号时，按索引头结构推断 V1/V2/V3。
+
+    - V3：``offset`` 起是 section 头（4 字节 type + 8 字节 size）；
+    - V2：40 字节 5×u64 索引头 + 4 字节 adler32（复用 #5 的判据）；
+    - V1：16 字节 4×u32 索引头，无 CRC。
+
+    三种布局的前 8 字节特征互斥：V2 的高 32 位恒为 0，V1 的前 8 字节
+    按 u64 读必然 >= 2**32，V3 的 section size 高 32 位恒为 0。
+    猜不出一律返回 None，由调用方回退默认值，不把兼容修复变成加载失败。
+    """
+    if encrypted_index:
+        # Encrypted=1 的索引头是 salsa 密文，_read_header 阶段密钥尚未算出
+        return None
+    try:
+        file_size = os.path.getsize(fname)
+        with open(fname, 'rb') as f:
+            f.seek(offset)
+            block = f.read(44)
+    except OSError:
+        return None
+    if len(block) < 16:
+        return None
+    remain = max(0, file_size - offset)
+
+    # --- V3 section 标记 ---
+    first_be = unpack('>I', block[:4])[0]
+    first_le = unpack('<I', block[:4])[0]
+    section_like = (first_be in (1, 2, 3, 4, 0x01000000, 0x02000000,
+                                 0x03000000, 0x04000000)
+                    or first_le in (1, 2, 3, 4))
+    # section size 的高 32 位为 0，借此与 V1 的 num_entries 区分开
+    if section_like and block[4:8] == b'\x00\x00\x00\x00':
+        size_be = unpack('>I', block[8:12])[0] if len(block) >= 12 else 0
+        size_le = unpack('<I', block[8:12])[0] if len(block) >= 12 else 0
+        if 0 < size_be < remain or 0 < size_le < remain:
+            return 3.0
+
+    # --- V2：40 字节索引头 + CRC ---
+    if len(block) >= 44:
+        crc_be = unpack('>I', block[40:44])[0]
+        crc_le = unpack('<I', block[40:44])[0]
+        actual = zlib.adler32(block[:40]) & 0xffffffff
+        if actual in (crc_be, crc_le):
+            return 2.0
+        # CRC 写错或缺失时用 5×u64 结构特征兜底：V1 的 q[0] 必然 >= 2**32
+        q = unpack('>5Q', block[:40])
+        if all(x < 0x100000000 for x in q) and q[0] > 0 and q[1] >= q[0] \
+                and q[2] > 0 and q[3] > 0 and q[4] > 0 \
+                and q[3] + q[4] + 44 <= remain:
+            return 2.0
+
+    # --- V1：16 字节 4×u32 ---
+    v1 = unpack('>4I', block[:16])
+    if v1[0] > 0 and v1[1] >= v1[0] and v1[2] > 0 and v1[3] > 0 \
+            and v1[2] + v1[3] + 16 <= remain:
+        return 1.2
+    return None
+
+
+def _compat_engine_version(header_tag, fname, key_block_offset,
+                           encrypted_index=False):
+    """【#4】解析引擎版本，缺 GeneratedByEngineVersion 不再 KeyError。
+
+    顺序：GeneratedByEngineVersion → RequiredEngineVersion（对齐 Rust
+    meta_unit 的取值口径）→ 按索引头结构探测 → 默认 2.0。
+    返回 ``(version, source)``，source 仅供诊断。
+    """
+    for key in _COMPAT_VERSION_KEYS:
+        version = _compat_parse_version(header_tag.get(key))
+        if version is not None:
+            return version, key.decode('ascii')
+    probed = _compat_probe_version(fname, key_block_offset, encrypted_index)
+    if probed is not None:
+        return probed, '索引头结构探测'
+    warnings.warn(
+        "MDX header 缺少 GeneratedByEngineVersion/RequiredEngineVersion，"
+        "且索引头结构无法判定，按 2.0 处理", RuntimeWarning)
+    return 2.0, '默认值'
+
+
+def _compat_default_encoding(version):
+    """【#6】Rust meta_unit：缺 Encoding 时 V3 = utf-8，V1/V2 = utf-16le。
+
+    旧实现一律按 utf-8 处理，未声明编码的 V1/V2 词典会按单字节切 key，
+    导致词条名乱码、索引错位。
+    """
+    return 'UTF-8' if version >= 3 else 'UTF-16LE'
+
+
 class MDict(object):
     """ Base class which reads in header and key block. """
     def __init__(self, fname, encoding='', passcode=None, build_index=True):
@@ -139,10 +405,10 @@ class MDict(object):
         return tagdict
 
     def _decode_block(self, block, decompressed_size):
-        info = unpack('<L', block[:4])[0]
-        compression_method = info & 0xf
-        encryption_method = (info >> 4) & 0xf
-        encryption_size = (info >> 8) & 0xff
+        head = _compat_head(block[:4])
+        compression_method = head['compression']
+        encryption_method = head['encryption']
+        encryption_size = head['encrypted_size']
         adler32 = unpack('>I', block[4:8])[0]
         encrypted_key = self._encrypted_key if self._encrypted_key is not None else ripemd128(block[4:8])
         data = block[8:]
@@ -152,43 +418,29 @@ class MDict(object):
         elif encryption_method == 2: decrypted_block = _salsa_decrypt(data[:encryption_size], encrypted_key) + data[encryption_size:]
         else: raise Exception('encryption method %d not supported' % encryption_method)
 
-        if self._version >= 3:
-            actual = zlib.adler32(decrypted_block) & 0xffffffff
-            if adler32 != actual:
-                raise ValueError(f"MDX 数据块校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
-
-        if compression_method == 0: decompressed_block = decrypted_block
-        elif compression_method == 1:
-            if lzo is None: raise RuntimeError("LZO compression is not supported")
-            header = b'\xf0' + pack('>I', decompressed_size)
-            decompressed_block = lzo.decompress(header + decrypted_block)
-        elif compression_method == 2: decompressed_block = zlib.decompress(decrypted_block)
-        else: raise Exception('compression method %d not supported' % compression_method)
-
-        if self._version < 3:
-            actual = zlib.adler32(decompressed_block) & 0xffffffff
-            if adler32 != actual:
-                raise ValueError(f"MDX 解压数据校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
+        # 【#3】压缩方法 0..5 统一交给兼容层；【#2】CRC 归属按本块是否加密判定
+        decompressed_block = _compat_decompress(compression_method, decrypted_block, decompressed_size)
+        _compat_verify_block_crc(adler32, decrypted_block, decompressed_block,
+                                 encryption_method != 0)
         return decompressed_block
 
-    def _decode_key_block_info(self, key_block_info_compressed, with_text=False):
+    def _decode_key_block_info(self, key_block_info_compressed, with_text=False,
+                               expected_size=None):
         """解析 key_block_info。
         - 默认(with_text=False)：返回 [(comp_size, decomp_size), ...]，供 MDict 自身建完整索引；
         - with_text=True：额外捕获每块的首词/尾词文本字节，返回
           [(num_entries, head_text, tail_text, comp_size, decomp_size), ...]，
-          供 CachedMDD 只建"块级索引 + 首/尾词"，无需解压任何 key block（与 mdict / PlainDictionaryAPP 对齐）。
+          供 CachedMDD 只建"块级索引 + 首/尾词"，无需解压任何 key block；
+        - expected_size：索引头里声明的解压后大小（V1 无此字段，传 None）。
         """
         if self._version >= 2:
-            if key_block_info_compressed[:4] != b'\x02\x00\x00\x00':
-                raise ValueError("MDX key block info 魔数不匹配")
-            if self._encrypt & 0x02:
-                key = ripemd128(key_block_info_compressed[4:8] + pack(b'<L', 0x3695))
-                key_block_info_compressed = key_block_info_compressed[:8] + _fast_decrypt(key_block_info_compressed[8:], key)
-            key_block_info = zlib.decompress(key_block_info_compressed[8:])
-            adler32 = unpack('>I', key_block_info_compressed[4:8])[0]
-            actual = zlib.adler32(key_block_info) & 0xffffffff
-            if adler32 != actual:
-                raise ValueError(f"MDX key block info 校验失败 (adler32): 期望 {adler32:#x}, 实际 {actual:#x}")
+            # 【#1/#2/#3/#5】块头位布局、加密、压缩方法 0..5、CRC 归属
+            # 全部由兼容层统一处理，不再硬匹配 02 00 00 00 魔数。
+            key_block_info = _compat_decode_key_block_info(
+                key_block_info_compressed,
+                bool(self._encrypt & 0x02),
+                expected_size,
+            )
         else:
             key_block_info = key_block_info_compressed
 
@@ -264,25 +516,30 @@ class MDict(object):
         else: header_text = header_bytes[:-1]
         header_tag = self._parse_header(header_text)
 
-        if not self._encoding:
-            encoding = header_tag.get(b'Encoding', b'utf-8')
-            if sys.hexversion >= 0x03000000: encoding = encoding.decode('utf-8')
-            if encoding in ['GBK', 'GB2312']: encoding = 'GB18030'
-            self._encoding = encoding
-
+        # 加密标记需先于版本解析：Encrypted=1 的索引头是密文，无法做结构探测
         if b'Encrypted' not in header_tag or header_tag[b'Encrypted'] == b'No': self._encrypt = 0
         elif header_tag[b'Encrypted'] == b'Yes': self._encrypt = 1
         else: self._encrypt = int(header_tag[b'Encrypted'])
+
+        # 【#4】缺 GeneratedByEngineVersion 不再 KeyError；版本须先于编码解析（#6）
+        self._version, self._version_source = _compat_engine_version(
+            header_tag, self._fname, self._key_block_offset,
+            encrypted_index=bool(self._encrypt & 1))
+        if self._version < 2.0: self._number_width, self._number_format = 4, '>I'
+        else: self._number_width, self._number_format = 8, '>Q'
+
+        if not self._encoding:
+            default_enc = _compat_default_encoding(self._version).encode('utf-8')
+            encoding = header_tag.get(b'Encoding', default_enc) or default_enc
+            if sys.hexversion >= 0x03000000: encoding = encoding.decode('utf-8')
+            if encoding in ['GBK', 'GB2312']: encoding = 'GB18030'
+            self._encoding = encoding
+        if self._version >= 3: self._encoding = 'UTF-8'
 
         self._stylesheet = {}
         if header_tag.get(b'StyleSheet'):
             lines = header_tag[b'StyleSheet'].splitlines()
             for i in range(0, len(lines), 3): self._stylesheet[lines[i]] = (lines[i+1], lines[i+2])
-
-        self._version = float(header_tag[b'GeneratedByEngineVersion'])
-        if self._version < 2.0: self._number_width, self._number_format = 4, '>I'
-        else: self._number_width, self._number_format = 8, '>Q'
-        if self._version >= 3: self._encoding = 'UTF-8'
         return header_tag
 
     def _read_keys(self):
@@ -335,13 +592,16 @@ class MDict(object):
                 key_block_info_decomp_size = self._read_number(sf)
                 key_block_info_size = self._read_number(sf)
                 key_block_size = self._read_number(sf)
-                f.read(4)
+                # 【#5】校验 40 字节索引头之后的 CRC，不再 f.read(4) 丢弃
+                _compat_verify_index_crc(block, f.read(4))
             else:
+                key_block_info_decomp_size = None
                 key_block_info_size = self._read_number(sf)
                 key_block_size = self._read_number(sf)
 
             key_block_info = f.read(key_block_info_size)
-            key_block_info_list = self._decode_key_block_info(key_block_info)
+            key_block_info_list = self._decode_key_block_info(
+                key_block_info, expected_size=key_block_info_decomp_size)
             key_block_compressed = f.read(key_block_size)
             key_list = self._decode_key_block(key_block_compressed, key_block_info_list)
             self._record_block_offset = f.tell()
@@ -356,8 +616,9 @@ class MDict(object):
             block = f.read(num_bytes)
             key_block_info = f.read(8)
             if self._version >= 2.0:
-                if key_block_info[:4] != b'\x02\x00\x00\x00':
-                    raise ValueError("MDX 暴力解析: key block info 魔数不匹配")
+                # 【#1】按位解析头，不再硬匹配 02 00 00 00
+                if _compat_head(key_block_info[:4])['compression'] not in _COMPAT_COMP_NAMES:
+                    raise ValueError("MDX 暴力解析: key block info 头非法")
             while True:
                 fpos = f.tell()
                 t = f.read(1024)
@@ -467,24 +728,93 @@ class MDD(MDict):
 class MDX(MDict):
     def __init__(self, fname, encoding='', substyle=False, passcode=None, build_index=True):
         MDict.__init__(self, fname, encoding, passcode, build_index)
-        self._substyle = substyle
+        # 【#8】Compact/StyleSheet 还原：header 带 compact 样式表时自动生效，
+        # 不再依赖调用方显式传 substyle=True。CachedMDX 过去以
+        # MDX(fname, build_index=False) 构造时没传该参数，正文里的 `` `N` ``
+        # 占位符会原样输出、词条样式全部丢失。
+        self._stylesheet = self._normalize_stylesheet(getattr(self, '_stylesheet', {}))
+        self._substyle = bool(substyle) or self._is_compact_stylesheet()
+
+    @staticmethod
+    def _normalize_stylesheet(stylesheet):
+        """把 header 三行一组的 StyleSheet 规整为 ``{b'0': (prefix, suffix)}``。
+
+        对照 Rust MdxReader::load_compact_stylesheet：token 是 0..255 的数字，
+        prefix/suffix 需要还原 HTML 实体。token 不是数字时说明这是普通 CSS
+        样式表（供前端使用），不应参与 compact 还原。
+        """
+        normalized = {}
+        for token, pair in (stylesheet or {}).items():
+            try:
+                t = token.strip()
+                if not t.isdigit() or int(t) > 255:
+                    continue
+                prefix, suffix = pair
+                normalized[str(int(t)).encode('ascii')] = (
+                    _unescape_entities(prefix), _unescape_entities(suffix))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return normalized
+
+    def _is_compact_stylesheet(self):
+        """规范化后仍非空即说明是 token/prefix/suffix 形式的 compact 样式表。
+
+        纯 CSS 样式表的 token 行不是数字，已在 _normalize_stylesheet 被剔除；
+        旧版把 Compact 拼成 Compat 的词典同样按此特征识别。
+        """
+        return bool(self._stylesheet)
 
     def _substitute_stylesheet(self, txt):
-        txt_list = re.split(rb'`\d+`', txt)
-        txt_tag = re.findall(rb'`\d+`', txt)
-        parts = [txt_list[0]]
-        for j, p in enumerate(txt_list[1:]):
-            style = self._stylesheet[txt_tag[j][1:-1]]
-            if p and p[-1] == '\n':
-                parts.append(style[0])
-                parts.append(p.rstrip())
-                parts.append(style[1])
-                parts.append(b'\r\n')
+        """还原 `` `N`内容` `` 占位符（对齐 Rust MdxReader::reformat）。
+
+        相比旧版 re.split 实现：未知 token 原样保留而不是抛 KeyError，
+        内容只取到下一个反引号，不会把跨段文本错误地一起包裹；
+        同时修正了旧版拿 bytes 的 p[-1] 与 str 的 '\\n' 比较（恒为假）的问题。
+        """
+        out = []
+        i, n = 0, len(txt)
+        while i < n:
+            if txt[i:i + 1] != b'`':
+                out.append(txt[i:i + 1])
+                i += 1
+                continue
+            j = i + 1
+            k = j
+            while k < n and txt[k:k + 1].isdigit():
+                k += 1
+            if k > j and k < n and txt[k:k + 1] == b'`':
+                token = txt[j:k]
+                style = self._stylesheet.get(str(int(token)).encode('ascii'))
+                i = k + 1
+                e = i
+                while e < n and txt[e:e + 1] != b'`':
+                    e += 1
+                body = txt[i:e]
+                # 下一个反引号后若不是数字 token，它是本段样式的闭合符，
+                # 直接消费（compact 正文里反引号是控制字符，不应透出到页面）。
+                closed = False
+                if e < n and not txt[e + 1:e + 2].isdigit():
+                    e += 1
+                    closed = True
+                i = e  # 否则留给下一轮，作为新 token 的起点
+                if style is None:
+                    out.append(b'`' + token + b'`')
+                    out.append(body)
+                    if closed: out.append(b'`')
+                    continue
+                if body.endswith(b'\n'):
+                    out.append(style[0])
+                    out.append(body.rstrip(b'\r\n'))
+                    out.append(style[1])
+                    out.append(b'\r\n')
+                else:
+                    out.append(style[0])
+                    out.append(body)
+                    out.append(style[1])
             else:
-                parts.append(style[0])
-                parts.append(p)
-                parts.append(style[1])
-        return b''.join(parts)
+                out.append(b'`')
+                i += 1
+        return b''.join(out)
 
     def _treat_record_data(self, data):
         data = data.decode(self._encoding, errors='ignore').strip(u'\x00').encode('utf-8')
@@ -496,8 +826,10 @@ class MDX(MDict):
 CACHE_VERSION = 3  # 递增使旧缓存自动失效
 
 class CachedMDX:
-    MAX_RECORD_CACHE = 5
-    MAX_KEY_CACHE = 10
+    # 缓存上限与常驻内存直接相关：解压后的 record block 单块可达数 MB，
+    # 已加载 N 本词典就是 N 份缓存。顺序访问下小缓存命中也很少失效。
+    MAX_RECORD_CACHE = 2
+    MAX_KEY_CACHE = 4
 
     def __init__(self, fname, encoding='utf-8', build_index=True):
         self.fname = fname
@@ -564,10 +896,30 @@ class CachedMDX:
         self._rec_decomp_prefix = [0]
         for meta in self._record_blocks_meta:
             self._rec_decomp_prefix.append(self._rec_decomp_prefix[-1] + meta["decomp"])
-        # 用于 key block 二分定位：各块首/尾 key 的小写形式（词典 key 有序，故递增）
+        # 用于 key block 二分定位：各块首/尾 key 的小写形式
         # first 用于精确查找时提前终止，last 用于定位前缀搜索的起始块
         self._key_first_lower = [m["first"].lower() for m in self._key_blocks_meta]
         self._key_last_lower = [m["last"].lower() for m in self._key_blocks_meta]
+        # 【#7】bisect_left 要求 _key_last_lower 单调递增。中文拼音 / ICU
+        # collation 词典按 sort key 排序，转成 str 后往往非单调，二分会静默漏词。
+        self._key_sorted = all(
+            self._key_last_lower[i] <= self._key_last_lower[i + 1]
+            for i in range(len(self._key_last_lower) - 1)
+        )
+
+    def _key_block_order(self, start, keep_order=True):
+        """【#7】返回待扫描的 key block 索引序列。
+
+        块序可靠时沿用二分起点；不可靠时退化为全块扫描（对齐 CachedMDD.get()
+        已有的兜底思路）。search_prefix 需要保持结果顺序（keep_order=True），
+        lookup_key 只要命中即可（先扫二分起点之后，再补齐之前）。
+        """
+        n = len(self._key_blocks_meta)
+        if getattr(self, '_key_sorted', True):
+            return range(start, n)
+        if keep_order:
+            return range(0, n)
+        return list(range(start, n)) + list(range(0, start))
 
     def _build_v3_index(self, m):
         with open(self.fname, 'rb') as f:
@@ -648,16 +1000,19 @@ class CachedMDX:
                 m._num_entries = m._read_number(sf)
 
                 if m._version >= 2.0:
-                    m._read_number(sf)
+                    kb_info_decomp_size = m._read_number(sf)
                     kb_info_size = m._read_number(sf)
                     kb_size = m._read_number(sf)
-                    f.read(4)
+                    # 【#5】校验索引头 CRC
+                    _compat_verify_index_crc(block, f.read(4))
                 else:
+                    kb_info_decomp_size = None
                     kb_info_size = m._read_number(sf)
                     kb_size = m._read_number(sf)
 
                 kb_info = f.read(kb_info_size)
-                kb_info_list = m._decode_key_block_info(kb_info)
+                kb_info_list = m._decode_key_block_info(
+                    kb_info, expected_size=kb_info_decomp_size)
                 kb_data_start = f.tell()
                 kb_compressed = f.read(kb_size)
                 self._record_block_offset = f.tell()
@@ -755,12 +1110,15 @@ class CachedMDX:
         if not metas:
             return results
         # 二分：第一个 last.lower() >= prefix_lower 的块（其前的块所有 key 均 < prefix）
+        sorted_blocks = getattr(self, '_key_sorted', True)
         start = bisect_left(self._key_last_lower, prefix_lower)
-        for idx in range(start, len(metas)):
+        for idx in self._key_block_order(start, keep_order=True):
             meta = metas[idx]
-            # 块首 key 已大于前缀且不以前缀开头 → 后续块更大，不可能再匹配
-            if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
-                break
+            # 【#7】有序假设只在块序可靠时成立
+            if sorted_blocks:
+                # 块首 key 已大于前缀且不以前缀开头 → 后续块更大，不可能再匹配
+                if meta["first"].lower() > prefix_lower and not meta["first"].lower().startswith(prefix_lower):
+                    break
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]  # O(1) 替代 O(n) 的 sum
             stop_outer = False
@@ -771,7 +1129,7 @@ class CachedMDX:
                     # 只有命中才 decode
                     key_str = key_bytes.decode('utf-8', errors='ignore')
                     results.append((key_str, base_abs_idx + local_idx))
-                elif key_lower_bytes > prefix_bytes:
+                elif sorted_blocks and key_lower_bytes > prefix_bytes:
                     # key 已排序，后续 key 都更大，不可能再匹配
                     stop_outer = True
                     break
@@ -794,11 +1152,12 @@ class CachedMDX:
             return None
         key_lower = key.lower()
         # 二分：第一个 last.lower() >= key_lower 的块（其前的块所有 key 均 < key）
+        sorted_blocks = getattr(self, '_key_sorted', True)
         start = bisect_left(self._key_last_lower, key_lower)
-        for idx in range(start, len(metas)):
+        for idx in self._key_block_order(start, keep_order=False):
             meta = metas[idx]
-            # 块首 key 已大于目标 → 块内有序，后续块更大，不可能相等
-            if meta["first"].lower() > key_lower:
+            # 【#7】块首 key 大于目标即终止的前提同样是块序可靠
+            if sorted_blocks and meta["first"].lower() > key_lower:
                 break
             keys_block = self._get_key_block(idx)
             base_abs_idx = self._key_count_prefix[idx]
@@ -858,7 +1217,9 @@ class CachedMDX:
 
 
 class CachedMDD:
-    MAX_CACHE = 10
+    # MDD 的 record block 多为压缩资源（图片/CSS），解压后很大；图片查看等
+    # 场景一次只会用一两块，缓存 2 块足够。
+    MAX_CACHE = 2
 
     def __init__(self, fname, encoding='utf-8'):
         self.fname = fname
@@ -899,6 +1260,10 @@ class CachedMDD:
         命中后由 _get_key_block 按需解压【单块】即可。
         """
         m = self.base_mdd
+        if m._version >= 3:
+            # 【#9】MDD 3.0 走独立的 section 布局
+            self._build_v3_block_index(m)
+            return
         with open(self.fname, 'rb') as f:
             f.seek(m._key_block_offset)
             num_bytes = 8 * 5 if m._version >= 2.0 else 4 * 4
@@ -909,16 +1274,19 @@ class CachedMDD:
             m._read_number(sf)
             m._num_entries = m._read_number(sf)
             if m._version >= 2.0:
-                m._read_number(sf)
+                kb_info_decomp_size = m._read_number(sf)
                 kb_info_size = m._read_number(sf)
                 kb_size = m._read_number(sf)
-                f.read(4)
+                # 【#5】校验索引头 CRC
+                _compat_verify_index_crc(block, f.read(4))
             else:
+                kb_info_decomp_size = None
                 kb_info_size = m._read_number(sf)
                 kb_size = m._read_number(sf)
             kb_info = f.read(kb_info_size)
             # 读取每块的首词/尾词文本（不再解压 key block 数据）
-            kb_info_list = m._decode_key_block_info(kb_info, with_text=True)
+            kb_info_list = m._decode_key_block_info(
+                kb_info, with_text=True, expected_size=kb_info_decomp_size)
             kb_data_start = f.tell()               # key block 区起点（用于命中后按需解压单块）
             f.seek(kb_data_start + kb_size)        # 跳过 key block 区，直接到 record block 区
             num_rb = m._read_number(f)
@@ -947,6 +1315,71 @@ class CachedMDD:
                 "decomp": decomp
             })
             local_offset += comp
+
+    def _build_v3_block_index(self, m):
+        """【#9】构建 MDD 3.0 的块级索引。
+
+        V3 与 V1/V2 布局完全不同：header 之后是一串
+        ``block_type(4B 大端) + block_size(8B >Q) + section 数据``，
+        其中 0x01000000 是 record block 区、0x03000000 是 key data 区。
+        旧实现只有 V1/V2 分支，遇到 MDD 3.0 会按 40 字节索引头去读，
+        偏移全错 → 资源一律 404。这里与 CachedMDX._build_v3_index 对齐。
+        """
+        with open(self.fname, 'rb') as f:
+            f.seek(m._key_block_offset)
+            key_data_offset = None
+            record_block_offset = None
+            while True:
+                block_type = m._read_int32(f)
+                block_size = m._read_number(f)
+                section_start = f.tell()
+                if block_type == 0x01000000:
+                    record_block_offset = section_start
+                elif block_type == 0x03000000:
+                    key_data_offset = section_start
+                f.seek(section_start + block_size)
+                if f.read(4):
+                    f.seek(-4, 1)
+                else:
+                    break
+
+            if key_data_offset is not None:
+                f.seek(key_data_offset)
+                num_kb = m._read_int32(f)
+                m._read_number(f)  # key data 区总长度
+                for _ in range(num_kb):
+                    decomp_size = m._read_int32(f)
+                    comp_size = m._read_int32(f)
+                    data_start = f.tell()
+                    kb_data = m._decode_block(f.read(comp_size), decomp_size)
+                    keys = m._split_key_block(kb_data)
+                    if keys:
+                        # _split_key_block 输出的 key 已统一为 utf-8 bytes
+                        self._key_blocks_meta.append({
+                            "first": keys[0][1].decode('utf-8', errors='ignore'),
+                            "last": keys[-1][1].decode('utf-8', errors='ignore'),
+                            "count": len(keys),
+                            "offset": data_start,
+                            "comp": comp_size,
+                            "decomp": decomp_size,
+                        })
+                    f.seek(data_start + comp_size)
+                m._num_entries = sum(x["count"] for x in self._key_blocks_meta)
+
+            if record_block_offset is not None:
+                f.seek(record_block_offset)
+                num_rb = m._read_int32(f)
+                m._read_number(f)  # record 区总长度
+                for _ in range(num_rb):
+                    decomp_size = m._read_int32(f)
+                    comp_size = m._read_int32(f)
+                    data_start = f.tell()
+                    self._record_blocks_meta.append({
+                        "offset": data_start,
+                        "comp": comp_size,
+                        "decomp": decomp_size,
+                    })
+                    f.seek(data_start + comp_size)
 
     def _get_key_block(self, idx):
         if idx in self._key_cache:
@@ -1000,7 +1433,11 @@ class CachedMDD:
         # 兜底：个别 MDD 的 key 排序与归一化后字典序不一致时，全块元数据扫描
         # （只比对 first/last，命中区间才解压，开销 O(块数)，可忽略）
         for idx in range(len(metas)):
-            if self._key_first_lower[idx] <= norm <= self._key_last_lower[idx]:
+            lo, hi = self._key_first_lower[idx], self._key_last_lower[idx]
+            # 【#9】V3 / collation 排序下块内首词可能"大于"尾词，
+            # 直接 first <= norm <= last 会恒为假，资源照样 404。
+            if lo > hi: lo, hi = hi, lo
+            if lo <= norm <= hi:
                 data = self._scan_block(idx, norm)
                 if data is not None:
                     return data
